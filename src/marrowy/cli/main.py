@@ -12,6 +12,7 @@ from marrowy.core.settings import get_settings
 from marrowy.db.base import Base
 from marrowy.db.session import SessionLocal
 from marrowy.db.session import engine
+from marrowy.integrations.whatsapp_relay import WhatsAppRelay
 from marrowy.providers.codex_bridge import CodexBridgeProvider
 from marrowy.providers.fake import FakeProvider
 from marrowy.services.conversations import ConversationService
@@ -50,6 +51,27 @@ def console(
     user_name: str = typer.Option(get_settings().default_user_name, "--user-name"),
 ) -> None:
     asyncio.run(_console(conversation_id=conversation_id, project_slug=project_slug, user_name=user_name))
+
+
+@app.command("whatsapp-relay")
+def whatsapp_relay(
+    auth_dir: str = typer.Option(".state/whatsapp", "--auth-dir"),
+    project_slug: str | None = typer.Option(None, "--project"),
+    group_subject: list[str] | None = typer.Option(None, "--group-subject"),
+    group_chat_id: list[str] | None = typer.Option(None, "--group-chat-id"),
+    include_from_me: bool = typer.Option(True, "--include-from-me/--exclude-from-me"),
+    cwd: str | None = typer.Option(None, "--cwd"),
+) -> None:
+    asyncio.run(
+        _whatsapp_relay(
+            auth_dir=auth_dir,
+            project_slug=project_slug,
+            group_subject=group_subject or [],
+            group_chat_id=group_chat_id or [],
+            include_from_me=include_from_me,
+            cwd=cwd,
+        )
+    )
 
 
 async def _console(*, conversation_id: str | None, project_slug: str | None, user_name: str) -> None:
@@ -104,3 +126,38 @@ def _build_provider():
         approval_policy=settings.codex_approval_policy,
         sandbox=settings.codex_sandbox,
     )
+
+
+async def _whatsapp_relay(
+    *,
+    auth_dir: str,
+    project_slug: str | None,
+    group_subject: list[str],
+    group_chat_id: list[str],
+    include_from_me: bool,
+    cwd: str | None,
+) -> None:
+    configure_logging()
+    db = SessionLocal()
+    try:
+        provider = _build_provider()
+        project_service = ProjectService(db)
+        project_id: str | None = None
+        if project_slug:
+            project = project_service.get_by_slug(project_slug)
+            if project is None:
+                raise typer.BadParameter(f"project {project_slug!r} not found")
+            project_id = project.id
+        relay = WhatsAppRelay(
+            db=db,
+            provider=provider,
+            auth_dir=auth_dir,
+            project_id=project_id,
+            group_subjects=group_subject,
+            group_chat_ids=group_chat_id,
+            include_from_me=include_from_me,
+            cwd=cwd,
+        )
+        await relay.run()
+    finally:
+        db.close()

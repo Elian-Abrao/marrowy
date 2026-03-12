@@ -177,20 +177,62 @@ pip install -e ".[dev]"
 cp .env.example .env
 ```
 
-### 2. Start PostgreSQL
+You can also bootstrap everything with:
+
+```bash
+scripts/bootstrap.sh
+```
+
+### 2. Recommended developer startup
+
+The easiest local startup flow is now:
+
+```bash
+source .venv/bin/activate
+marrowy dev-web
+```
+
+This command will:
+
+- ensure `.env` exists
+- start PostgreSQL with Docker Compose
+- wait for the database
+- run migrations
+- seed the default project
+- auto-start the local `codex-runtime-bridge` when needed
+- start the browser server
+
+Useful related commands:
+
+```bash
+marrowy doctor
+marrowy dev-console
+```
+
+Script wrappers are available too:
+
+```bash
+scripts/dev_up.sh
+scripts/console.sh
+scripts/doctor.sh
+```
+
+### 3. Manual startup (if you want full control)
+
+#### Start PostgreSQL
 
 ```bash
 docker compose up -d postgres
 ```
 
-### 3. Run migrations and seed data
+#### Run migrations and seed data
 
 ```bash
 alembic upgrade head
 marrowy seed
 ```
 
-### 4. Start the Codex bridge
+#### Start the Codex bridge
 
 This project expects the existing `codex-runtime-bridge` to be available.
 
@@ -202,7 +244,7 @@ source .venv/bin/activate
 env PYTHONPATH=src python -m codex_runtime_bridge serve --port 8787
 ```
 
-### 5. Start Marrowy
+#### Start Marrowy
 
 ```bash
 cd /home/elian/projetos/pessoal/open-source/marrowy
@@ -236,7 +278,7 @@ The UI refreshes through SSE and now exposes:
 ## Terminal Console
 
 ```bash
-marrowy console --project marrowy-demo --user-name Elian
+marrowy dev-console --project marrowy-demo --user-name Elian
 ```
 
 Useful approval commands inside the console:
@@ -291,6 +333,10 @@ Most important:
 - `MARROWY_MODEL_PROVIDER`
 - `MARROWY_CODEX_APPROVAL_POLICY`
 - `MARROWY_CODEX_SANDBOX`
+- `MARROWY_CODEX_TIMEOUT_SECONDS`
+
+`MARROWY_CODEX_TIMEOUT_SECONDS` is the HTTP/SSE timeout for a single Marrowy -> Codex bridge turn.
+It is not a “tool call step timeout”. It represents how long Marrowy will wait for the bridge to finish a provider turn before surfacing a timeout error in chat.
 
 ## Tests
 

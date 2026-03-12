@@ -2,4 +2,4 @@
 set -euo pipefail
 
 source .venv/bin/activate
-marrowy dev-web
+marrowy dev-console "$@"

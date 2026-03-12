@@ -11,6 +11,15 @@ from marrowy.api.deps import build_provider
 from marrowy.api.app import create_app
 from marrowy.core.logging import configure_logging
 from marrowy.core.settings import get_settings
+from marrowy.devtools import BridgeProcess
+from marrowy.devtools import bridge_ready
+from marrowy.devtools import ensure_env_file
+from marrowy.devtools import ensure_postgres_container
+from marrowy.devtools import run_migrations
+from marrowy.devtools import seed_default_project
+from marrowy.devtools import start_local_bridge
+from marrowy.devtools import wait_for_bridge
+from marrowy.devtools import wait_for_database
 from marrowy.db.base import Base
 from marrowy.db.models import ConversationMessage
 from marrowy.db.models import DomainEvent
@@ -30,6 +39,61 @@ app = typer.Typer(help="Marrowy CLI")
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     configure_logging()
     uvicorn.run(create_app(), host=host, port=port)
+
+
+@app.command("doctor")
+def doctor() -> None:
+    settings = get_settings()
+    env_created = ensure_env_file(settings.base_dir)
+    typer.echo(f".env: {'created from .env.example' if env_created else 'ok'}")
+    if settings.is_sqlite:
+        typer.echo(f"database: sqlite ({settings.database_url})")
+    else:
+        db_ok = True
+        db_error = ""
+        try:
+            wait_for_database(settings.database_url, timeout_seconds=3.0)
+        except Exception as exc:
+            db_ok = False
+            db_error = str(exc)
+        typer.echo(f"database: {'ok' if db_ok else f'not ready ({db_error})'}")
+    bridge_ok = bridge_ready(settings.codex_bridge_url)
+    typer.echo(f"bridge: {'ok' if bridge_ok else f'not ready at {settings.codex_bridge_url}'}")
+    if not bridge_ok:
+        typer.echo(
+            "hint: run `marrowy dev-web` / `marrowy dev-console` to auto-start local dependencies, "
+            "or start codex-runtime-bridge manually."
+        )
+
+
+@app.command("dev-web")
+def dev_web(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    start_bridge: bool = typer.Option(True, "--start-bridge/--no-start-bridge"),
+) -> None:
+    configure_logging()
+    bridge_process = _prepare_dev_environment(start_bridge=start_bridge)
+    try:
+        typer.echo(f"Marrowy web ready on http://{host}:{port}")
+        uvicorn.run(create_app(), host=host, port=port)
+    finally:
+        _stop_bridge_process(bridge_process)
+
+
+@app.command("dev-console")
+def dev_console(
+    conversation_id: Optional[str] = typer.Option(None, "--conversation-id"),
+    project_slug: Optional[str] = typer.Option("marrowy-demo", "--project"),
+    user_name: str = typer.Option(get_settings().default_user_name, "--user-name"),
+    start_bridge: bool = typer.Option(True, "--start-bridge/--no-start-bridge"),
+) -> None:
+    configure_logging()
+    bridge_process = _prepare_dev_environment(start_bridge=start_bridge)
+    try:
+        asyncio.run(_console(conversation_id=conversation_id, project_slug=project_slug, user_name=user_name))
+    finally:
+        _stop_bridge_process(bridge_process)
 
 
 @app.command("init-db")
@@ -142,7 +206,50 @@ def _build_provider():
         base_url=settings.codex_bridge_url,
         approval_policy=settings.codex_approval_policy,
         sandbox=settings.codex_sandbox,
+        timeout=settings.codex_timeout_seconds,
     )
+
+
+def _prepare_dev_environment(*, start_bridge: bool) -> BridgeProcess | None:
+    settings = get_settings()
+    created_env = ensure_env_file(settings.base_dir)
+    if created_env:
+        typer.echo("Created .env from .env.example")
+    if not settings.is_sqlite:
+        typer.echo("Starting PostgreSQL container...")
+        ensure_postgres_container(settings.base_dir)
+        typer.echo("Waiting for database...")
+        wait_for_database(settings.database_url)
+    typer.echo("Applying migrations...")
+    run_migrations(settings.base_dir)
+    seeded_project = seed_default_project()
+    typer.echo(f"Seeded default project: {seeded_project}")
+
+    bridge_process: BridgeProcess | None = None
+    if settings.model_provider == "codex":
+        if bridge_ready(settings.codex_bridge_url):
+            typer.echo(f"Codex bridge already ready at {settings.codex_bridge_url}")
+        elif start_bridge:
+            typer.echo("Starting local codex-runtime-bridge...")
+            bridge_process = start_local_bridge(settings)
+            wait_for_bridge(settings.codex_bridge_url)
+            typer.echo(
+                f"Codex bridge started at {settings.codex_bridge_url} "
+                f"(pid={bridge_process.process.pid}, log={bridge_process.log_path})"
+            )
+        else:
+            raise typer.BadParameter(
+                f"Codex bridge is not ready at {settings.codex_bridge_url}. "
+                "Start it manually or use --start-bridge."
+            )
+    return bridge_process
+
+
+def _stop_bridge_process(bridge_process: BridgeProcess | None) -> None:
+    if bridge_process is None:
+        return
+    typer.echo(f"Stopping local codex-runtime-bridge (pid={bridge_process.process.pid})")
+    bridge_process.stop()
 
 
 async def _whatsapp_relay(

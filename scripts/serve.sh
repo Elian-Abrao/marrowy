@@ -2,4 +2,4 @@
 set -euo pipefail
 
 source .venv/bin/activate
-marrowy serve
+marrowy dev-web

@@ -10,3 +10,6 @@ def test_cli_help():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "Marrowy CLI" in result.stdout
+    assert "dev-web" in result.stdout
+    assert "dev-console" in result.stdout
+    assert "doctor" in result.stdout

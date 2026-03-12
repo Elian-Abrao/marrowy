@@ -62,6 +62,22 @@ class PolicyService:
         )
         return approval
 
+    def find_pending(
+        self,
+        *,
+        conversation_id: str,
+        action_type: str,
+        task_id: str | None = None,
+    ) -> ApprovalRequest | None:
+        stmt = select(ApprovalRequest).where(
+            ApprovalRequest.conversation_id == conversation_id,
+            ApprovalRequest.action_type == action_type,
+            ApprovalRequest.status == ApprovalStatus.PENDING.value,
+        )
+        if task_id is not None:
+            stmt = stmt.where(ApprovalRequest.task_id == task_id)
+        return self.db.scalar(stmt.order_by(ApprovalRequest.created_at.desc()))
+
     def resolve(self, approval: ApprovalRequest, *, actor_name: str, decision: str) -> ApprovalRequest:
         approval.status = ApprovalStatus.APPROVED.value if decision == "approve" else ApprovalStatus.REJECTED.value
         approval.resolved_by = actor_name

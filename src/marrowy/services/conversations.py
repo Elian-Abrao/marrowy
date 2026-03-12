@@ -185,6 +185,7 @@ class ConversationService:
         orchestration_notes = self._derive_orchestration_actions(context, content, user_message.id)
         for note in orchestration_notes:
             created_messages.append(note)
+        context = self._message_context(conversation_id)
 
         for participant in self._participants_to_invoke(context, content):
             role_messages = await self._invoke_agent(
@@ -237,6 +238,18 @@ class ConversationService:
                     content=f"[Agent Principal] Added {github.display_name} to handle repository operations.",
                     message_type=MessageKind.AGENT.value,
                     participant_id=context.principal.id,
+                    )
+                )
+        if any(phrase in text for phrase in ["add po", "add pm", "add po/pm", "bring in po", "bring in pm", "@po", "@pm", "agent po/pm"]):
+            po_pm = self.add_agent(context.conversation.id, "po_pm")
+            messages.append(
+                self.add_message(
+                    conversation_id=context.conversation.id,
+                    author_name=context.principal.display_name,
+                    author_kind=ParticipantKind.AGENT.value,
+                    content=f"[Agent Principal] Added {po_pm.display_name} to manage task decomposition and delivery planning.",
+                    message_type=MessageKind.AGENT.value,
+                    participant_id=context.principal.id,
                 )
             )
         if any(phrase in text for phrase in ["add devops", "bring in devops", "@devops"]):
@@ -273,8 +286,31 @@ class ConversationService:
                     )
                 )
 
-        if any(token in text for token in ["task", "build", "create project", "mvp", "pipeline", "feature"]):
-            if "pipeline" in text or "deploy" in text or "mvp" in text or "create project" in text:
+        active_pipeline = next(
+            (
+                task
+                for task in self.tasks.list_for_conversation(context.conversation.id)
+                if task.kind == "pipeline" and task.status not in {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
+            ),
+            None,
+        )
+        wants_new_project = any(token in text for token in ["brand-new", "new project", "another project", "separate project"])
+        wants_pipeline_creation = (
+            (
+                "pipeline" in text
+                and any(token in text for token in ["create", "set up", "build", "prepare", "start"])
+            )
+            or any(
+                token in text
+                for token in [
+                    "create project",
+                    "new mvp",
+                ]
+            )
+        )
+        wants_simple_task = any(token in text for token in ["create task", "separate task", "follow-up task"])
+        if wants_pipeline_creation or wants_simple_task:
+            if wants_pipeline_creation and (active_pipeline is None or wants_new_project):
                 root, stages = self.tasks.create_pipeline_task(
                     conversation_id=context.conversation.id,
                     project_id=context.conversation.project_id,
@@ -296,7 +332,7 @@ class ConversationService:
                         metadata={"taskId": root.id},
                     )
                 )
-            else:
+            elif wants_simple_task:
                 task = self.tasks.create_simple_task(
                     conversation_id=context.conversation.id,
                     project_id=context.conversation.project_id,
@@ -318,14 +354,20 @@ class ConversationService:
                 )
         if "deploy" in text or "production" in text:
             latest_pipeline = next((task for task in self.tasks.list_for_conversation(context.conversation.id) if task.kind == "pipeline"), None)
-            approval = self.policies.create_approval(
-                conversation=context.conversation,
-                agent_key="principal",
+            approval = self.policies.find_pending(
+                conversation_id=context.conversation.id,
                 action_type="deploy.production",
-                summary="Approve production deployment for the active workstream.",
-                details={"environment": "production"},
                 task_id=latest_pipeline.id if latest_pipeline else None,
             )
+            if approval is None:
+                approval = self.policies.create_approval(
+                    conversation=context.conversation,
+                    agent_key="principal",
+                    action_type="deploy.production",
+                    summary="Approve production deployment for the active workstream.",
+                    details={"environment": "production"},
+                    task_id=latest_pipeline.id if latest_pipeline else None,
+                )
             if latest_pipeline is not None:
                 self.tasks.set_status(latest_pipeline, TaskStatus.WAITING_APPROVAL)
             messages.append(
@@ -431,16 +473,16 @@ class ConversationService:
     def _participants_to_invoke(self, context: MessageContext, content: str) -> list[ConversationParticipant]:
         text = content.lower()
         ordered_keys = ["principal"]
-        if any(token in text for token in ["bug", "fix", "implement", "diagnose", "project", "mvp", "task"]):
-            ordered_keys.append("specialist")
-        if any(token in text for token in ["test", "validate", "qa", "@qa"]):
-            ordered_keys.append("qa")
-        if any(token in text for token in ["commit", "branch", "pull request", "repo", "@github"]):
-            ordered_keys.append("github")
-        if any(token in text for token in ["deploy", "infra", "environment", "@devops"]):
-            ordered_keys.append("devops")
-        if any(token in text for token in ["plan", "scope", "roadmap", "@po", "@pm"]):
-            ordered_keys.append("po_pm")
+        role_tokens = {
+            "specialist": ["@specialist", "agent specialist", "ask specialist", "have specialist", "bring in specialist", "add specialist"],
+            "qa": ["@qa", "agent qa", "ask qa", "have qa", "bring in qa", "add qa"],
+            "github": ["@github", "agent github", "ask github", "have github", "bring in github", "add github"],
+            "devops": ["@devops", "agent devops", "ask devops", "have devops", "bring in devops", "add devops"],
+            "po_pm": ["@po", "@pm", "agent po/pm", "agent pm", "agent po", "ask pm", "ask po", "have pm", "bring in pm", "add pm", "add po/pm"],
+        }
+        for key, tokens in role_tokens.items():
+            if any(token in text for token in tokens):
+                ordered_keys.append(key)
         participants_by_key = {participant.agent_key: participant for participant in context.participants if participant.agent_key}
         invoked: list[ConversationParticipant] = []
         for key in ordered_keys:
@@ -502,21 +544,21 @@ class ConversationService:
             (
                 item
                 for item in self.tasks.list_for_conversation(conversation_id)
-                if item.assigned_agent_key == profile.key and item.status in {TaskStatus.CREATED.value, TaskStatus.PLANNED.value, TaskStatus.IN_PROGRESS.value, TaskStatus.TESTING.value, TaskStatus.DEPLOYING.value}
+                if item.assigned_agent_key == profile.key and item.status in {TaskStatus.CREATED.value, TaskStatus.PLANNED.value}
             ),
             None,
         )
         if task is None:
             return []
         target_status = {
-            "principal": TaskStatus.IN_PROGRESS,
-            "specialist": TaskStatus.IN_PROGRESS if task.status != TaskStatus.IN_PROGRESS.value else TaskStatus.TESTING,
-            "qa": TaskStatus.TESTING if task.status != TaskStatus.TESTING.value else TaskStatus.DONE,
-            "github": TaskStatus.IN_PROGRESS,
-            "devops": TaskStatus.DEPLOYING,
+            "principal": None,
+            "specialist": TaskStatus.IN_PROGRESS,
+            "qa": TaskStatus.TESTING,
+            "github": None,
+            "devops": TaskStatus.BLOCKED,
             "po_pm": TaskStatus.PLANNED,
-        }.get(profile.key, TaskStatus.IN_PROGRESS)
-        if task.status == target_status.value:
+        }.get(profile.key, None)
+        if target_status is None or task.status == target_status.value:
             return []
         self.tasks.set_status(task, target_status)
         return [

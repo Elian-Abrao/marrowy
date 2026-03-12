@@ -25,7 +25,7 @@ async def test_conversation_service_creates_pipeline_and_agents(db_session):
     assert len(messages) >= 4
     participants = service.list_participants(conversation.id)
     participant_keys = {item.agent_key for item in participants if item.agent_key}
-    assert {"principal", "specialist", "qa", "devops"}.issubset(participant_keys)
+    assert {"principal", "qa"}.issubset(participant_keys)
 
     tasks = service.tasks.list_for_conversation(conversation.id)
     assert any(task.kind == "pipeline" for task in tasks)
@@ -55,3 +55,85 @@ async def test_resolving_approval_updates_task_state(db_session):
     task = service.tasks.get(approval.task_id)
     assert task is not None
     assert task.status == "deploying"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_coordination_does_not_duplicate_pipeline(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Pipeline dedupe", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Please create the task pipeline for a basic todo MVP with diagnosis, implementation, QA, and deploy readiness.",
+        user_name="Elian",
+    )
+    db_session.commit()
+    initial_pipeline_count = len([task for task in service.tasks.list_for_conversation(conversation.id) if task.kind == "pipeline"])
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Add Agent PO/PM and give them a short onboarding handoff for the active todo MVP pipeline.",
+        user_name="Elian",
+    )
+    db_session.commit()
+    pipeline_count = len([task for task in service.tasks.list_for_conversation(conversation.id) if task.kind == "pipeline"])
+    participants = service.list_participants(conversation.id)
+
+    assert pipeline_count == initial_pipeline_count == 1
+    assert any(participant.agent_key == "po_pm" for participant in participants)
+
+
+@pytest.mark.asyncio
+async def test_repeated_deploy_requests_do_not_duplicate_pending_approvals(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Approval dedupe", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Please create the task pipeline for a basic single-user web todo MVP with diagnosis, implementation, QA, and deploy readiness.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Please prepare a production deployment for the active MVP pipeline.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    approvals = service.policies.pending_for_conversation(conversation.id)
+    assert len(approvals) == 1
+
+
+@pytest.mark.asyncio
+async def test_qa_and_devops_statuses_do_not_jump_to_done_or_deploying(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Status guard", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Please create the task pipeline for a basic single-user web todo MVP with diagnosis, implementation, QA, and deploy readiness.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Add Agent QA and ask for the first validation focus.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Add Agent DevOps and ask for the environment and deploy prerequisites.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    tasks = service.tasks.list_for_conversation(conversation.id)
+    qa_task = next(task for task in tasks if task.assigned_agent_key == "qa")
+    devops_task = next(task for task in tasks if task.assigned_agent_key == "devops")
+    assert qa_task.status == "testing"
+    assert devops_task.status == "blocked"

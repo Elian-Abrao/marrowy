@@ -27,7 +27,7 @@ def test_project_and_conversation_api_flow(client, db_session):
 
     response = client.post(
         f"/api/conversations/{conversation['id']}/messages",
-        json={"content": "Please build a mini dashboard MVP and add QA for validation.", "author_name": "Elian"},
+        json={"content": "Please create a mini dashboard MVP pipeline and add QA for validation.", "author_name": "Elian"},
     )
     assert response.status_code == 200
     messages = response.json()
@@ -38,7 +38,7 @@ def test_project_and_conversation_api_flow(client, db_session):
 
     participants = client.get(f"/api/conversations/{conversation['id']}/participants").json()
     keys = {participant["agent_key"] for participant in participants if participant["agent_key"]}
-    assert {"principal", "specialist", "qa"}.issubset(keys)
+    assert {"principal", "qa"}.issubset(keys)
 
 
 def test_whatsapp_channel_inbound(client, db_session):

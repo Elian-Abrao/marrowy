@@ -24,6 +24,7 @@ def build_provider(settings: Settings):
         base_url=settings.codex_bridge_url,
         approval_policy=settings.codex_approval_policy,
         sandbox=settings.codex_sandbox,
+        timeout=settings.codex_timeout_seconds,
     )
 
 

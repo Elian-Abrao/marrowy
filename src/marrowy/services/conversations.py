@@ -7,6 +7,7 @@ from datetime import timezone
 from typing import Iterable
 
 from sqlalchemy import select
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from marrowy.db.models import ApprovalRequest
@@ -16,6 +17,7 @@ from marrowy.db.models import ConversationParticipant
 from marrowy.db.models import Job
 from marrowy.db.models import Project
 from marrowy.db.models import Task
+from marrowy.db.models import DomainEvent
 from marrowy.domain.agents import AGENT_PROFILES
 from marrowy.domain.agents import AgentProfile
 from marrowy.domain.agents import get_agent_profile
@@ -84,6 +86,21 @@ class ConversationService:
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         return self.db.get(Conversation, conversation_id)
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        conversation = self.get_conversation(conversation_id)
+        if conversation is None:
+            return False
+
+        self.db.execute(delete(Job).where(Job.conversation_id == conversation_id))
+        self.db.execute(delete(ApprovalRequest).where(ApprovalRequest.conversation_id == conversation_id))
+        self.db.execute(delete(DomainEvent).where(DomainEvent.conversation_id == conversation_id))
+        self.db.execute(delete(Task).where(Task.conversation_id == conversation_id))
+        self.db.execute(delete(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id))
+        self.db.execute(delete(ConversationParticipant).where(ConversationParticipant.conversation_id == conversation_id))
+        self.db.delete(conversation)
+        self.db.flush()
+        return True
 
     def create_conversation(
         self,
@@ -216,7 +233,7 @@ class ConversationService:
             author_name="Agent Principal",
             author_kind=ParticipantKind.AGENT.value,
             content=(
-                f"[Agent Principal]\nApproval {approval_id} was {'approved' if decision == 'approve' else 'rejected'}. "
+                f"Approval {approval_id} was {'approved' if decision == 'approve' else 'rejected'}. "
                 "I updated the relevant task state and will continue coordination."
             ),
             message_type=MessageKind.AGENT.value,
@@ -237,6 +254,14 @@ class ConversationService:
         )
         created_messages: list[ConversationMessage] = [user_message]
         created_messages.append(self._acknowledge_user_message(context, user_message))
+
+        local_status_reply = self._maybe_build_local_status_reply(context, content)
+        if local_status_reply is not None:
+            created_messages.append(local_status_reply)
+            self._refresh_conversation_state(conversation_id)
+            context.conversation.updated_at = _utcnow()
+            self.db.flush()
+            return created_messages
 
         plan = self._derive_orchestration_plan(context, content, user_message)
         created_messages.extend(plan.messages)
@@ -299,6 +324,15 @@ class ConversationService:
             if not progress_text:
                 return
             self.jobs.append_progress(job, text=progress_text, progress_type=event_type)
+            self.add_message(
+                conversation_id=conversation.id,
+                author_name=profile.display_name,
+                author_kind=ParticipantKind.AGENT.value,
+                content=progress_text,
+                message_type=MessageKind.SYSTEM.value,
+                participant_id=participant.id,
+                metadata={"jobId": job.id, "progressType": event_type},
+            )
             self.db.commit()
 
         try:
@@ -311,23 +345,31 @@ class ConversationService:
                 event_handler=on_provider_event,
             )
         except Exception as exc:
-            self.jobs.fail(job, error=str(exc))
+            error_text = self._describe_provider_failure(exc)
+            self.jobs.fail(job, error=error_text)
             self.add_message(
                 conversation_id=conversation.id,
                 author_name=profile.display_name,
                 author_kind=ParticipantKind.AGENT.value,
-                content=f"[{profile.display_name}]\nI could not complete my turn because the provider failed: {exc}",
+                content=f"I could not complete my turn because the provider failed: {error_text}",
                 message_type=MessageKind.AGENT.value,
                 participant_id=participant.id,
+                metadata={"jobId": job.id, "error": error_text},
             )
             self._maybe_transition_task_on_job_failure(job)
+            self._add_failure_follow_up(
+                conversation=conversation,
+                participant=participant,
+                job=job,
+                error_text=error_text,
+            )
             self._refresh_conversation_state(conversation.id)
             self.db.commit()
             return
 
         if thread_id and participant.bridge_thread_id != thread_id:
             participant.bridge_thread_id = thread_id
-        content = f"[{profile.display_name}]\n{result.text}".strip()
+        content = result.text.strip()
         self.add_message(
             conversation_id=conversation.id,
             author_name=profile.display_name,
@@ -372,10 +414,63 @@ class ConversationService:
             conversation_id=context.conversation.id,
             author_name=context.principal.display_name,
             author_kind=ParticipantKind.AGENT.value,
-            content=f"[Agent Principal]\n{summary}",
+            content=summary,
             message_type=MessageKind.SYSTEM.value,
             participant_id=context.principal.id,
             metadata={"ackForMessageId": user_message.id},
+        )
+
+    @staticmethod
+    def _describe_provider_failure(exc: Exception) -> str:
+        detail = str(exc).strip()
+        if detail:
+            return detail
+        return f"{exc.__class__.__name__}: the provider ended the turn without a final response."
+
+    def _add_failure_follow_up(
+        self,
+        *,
+        conversation: Conversation,
+        participant: ConversationParticipant,
+        job: Job,
+        error_text: str,
+    ) -> None:
+        principal = next(
+            (
+                item
+                for item in self.list_participants(conversation.id)
+                if item.agent_key == "principal"
+            ),
+            None,
+        )
+        if principal is None:
+            return
+        task_note = ""
+        if job.task_id:
+            task = self.tasks.get(job.task_id)
+            if task is not None:
+                task_note = f" Task `{task.id}` is now in `{task.status}`."
+        if participant.agent_key and participant.agent_key != "principal":
+            direct_hint = f" If you want to talk directly to them next, mention `@{participant.agent_key}`."
+            content = (
+                f"{participant.display_name} hit an execution problem and could not finish the last turn.\n\n"
+                f"Error recorded: {error_text}\n\n"
+                f"We can retry, reduce the scope, or continue with another agent.{task_note}{direct_hint}"
+            )
+        else:
+            content = (
+                "I hit an execution problem while preparing the last reply.\n\n"
+                f"Error recorded: {error_text}\n\n"
+                "You can ask me to retry, narrow the request, or ask for a room status update instead."
+            )
+        self.add_message(
+            conversation_id=conversation.id,
+            author_name=principal.display_name,
+            author_kind=ParticipantKind.AGENT.value,
+            content=content,
+            message_type=MessageKind.AGENT.value,
+            participant_id=principal.id,
+            metadata={"jobId": job.id, "failureFollowUp": True, "failedAgentKey": participant.agent_key},
         )
 
     def _derive_orchestration_plan(
@@ -419,7 +514,7 @@ class ConversationService:
                         author_name=context.principal.display_name,
                         author_kind=ParticipantKind.AGENT.value,
                         content=(
-                            f"[Agent Principal] Created pipeline task {root_task.id} with {len(stage_tasks)} delivery stages. "
+                            f"Created pipeline task {root_task.id} with {len(stage_tasks)} delivery stages. "
                             "The work has been broken into coordinated execution units."
                         ),
                         message_type=MessageKind.AGENT.value,
@@ -433,7 +528,7 @@ class ConversationService:
                         conversation_id=context.conversation.id,
                         author_name=context.principal.display_name,
                         author_kind=ParticipantKind.AGENT.value,
-                        content=f"[Agent Principal] Reusing active pipeline task {root_task.id} instead of creating a duplicate.",
+                        content=f"Reusing active pipeline task {root_task.id} instead of creating a duplicate.",
                         message_type=MessageKind.SYSTEM.value,
                         participant_id=context.principal.id,
                         metadata={"taskId": root_task.id},
@@ -448,7 +543,7 @@ class ConversationService:
                         conversation_id=context.conversation.id,
                         author_name=context.principal.display_name,
                         author_kind=ParticipantKind.AGENT.value,
-                        content=f"[Agent Principal] Created task {task.id} and mapped it to Agent Specialist.",
+                        content=f"Created task {task.id} and mapped it to Agent Specialist.",
                         message_type=MessageKind.AGENT.value,
                         participant_id=context.principal.id,
                         metadata={"taskId": task.id},
@@ -464,7 +559,7 @@ class ConversationService:
                     author_name=context.principal.display_name,
                     author_kind=ParticipantKind.AGENT.value,
                     content=(
-                        f"[Agent Principal] {'Created' if created else 'Reused'} {len(subtasks)} subtasks under task {root_task.id} "
+                        f"{'Created' if created else 'Reused'} {len(subtasks)} subtasks under task {root_task.id} "
                         "to make the next execution steps explicit."
                     ),
                     message_type=MessageKind.AGENT.value,
@@ -503,7 +598,7 @@ class ConversationService:
                     conversation_id=context.conversation.id,
                     author_name=context.principal.display_name,
                     author_kind=ParticipantKind.AGENT.value,
-                    content=f"[Agent Principal] Production deploy is blocked pending approval {approval.id}.",
+                    content=f"Production deploy is blocked pending approval {approval.id}.",
                     message_type=MessageKind.APPROVAL.value,
                     participant_id=context.principal.id,
                     metadata={"approvalId": approval.id},
@@ -524,6 +619,129 @@ class ConversationService:
                 )
             )
         return plan
+
+    def _maybe_build_local_status_reply(self, context: MessageContext, content: str) -> ConversationMessage | None:
+        text = _normalize_text(content)
+        task_tokens = [
+            "temos task aberta",
+            "tem task aberta",
+            "tem tarefa aberta",
+            "temos tarefa aberta",
+            "have an open task",
+            "open task",
+            "what task is open",
+            "quais tasks estao abertas",
+            "quais tarefas estao abertas",
+        ]
+        status_tokens = [
+            "ele finalizou",
+            "ele terminou",
+            "o que ele disse",
+            "oq ele disse",
+            "did he finish",
+            "what did he say",
+            "still running",
+            "status do especialista",
+        ]
+        direct_tokens = [
+            "como eu faco para falar diretamente",
+            "como eu faço para falar diretamente",
+            "how do i talk directly",
+            "how can i talk directly",
+        ]
+        if not any(token in text for token in [*task_tokens, *status_tokens, *direct_tokens]):
+            return None
+
+        active_tasks = [
+            task
+            for task in context.tasks
+            if task.status not in {TaskStatus.DONE.value, TaskStatus.CANCELLED.value}
+        ]
+        if any(token in text for token in task_tokens):
+            if active_tasks:
+                lines = ["Sim, ja existe trabalho aberto nesta conversa:"]
+                for task in active_tasks[:5]:
+                    owner = task.assigned_agent_key or "unassigned"
+                    lines.append(f"- `{task.id}` [{task.status}] {task.title} -> {owner}")
+                if len(active_tasks) > 5:
+                    lines.append(f"- e mais {len(active_tasks) - 5} task(s) ativas")
+            else:
+                lines = ["Nao ha task aberta no momento nesta conversa."]
+            return self.add_message(
+                conversation_id=context.conversation.id,
+                author_name=context.principal.display_name,
+                author_kind=ParticipantKind.AGENT.value,
+                content="\n".join(lines),
+                message_type=MessageKind.AGENT.value,
+                participant_id=context.principal.id,
+                metadata={"localStatusReply": True, "replyKind": "task-status"},
+            )
+
+        non_principal_participants = [
+            participant
+            for participant in self.list_participants(context.conversation.id)
+            if participant.agent_key and participant.agent_key != "principal"
+        ]
+        if not non_principal_participants:
+            return None
+
+        active_statuses = {
+            JobStatus.QUEUED.value,
+            JobStatus.CLAIMED.value,
+            JobStatus.RUNNING.value,
+            JobStatus.WAITING.value,
+        }
+        jobs_by_agent = {
+            participant.agent_key: [
+                job for job in self.jobs.list_for_conversation(context.conversation.id) if job.agent_key == participant.agent_key
+            ]
+            for participant in non_principal_participants
+        }
+        target = non_principal_participants[-1]
+        active_job = next((job for job in reversed(jobs_by_agent.get(target.agent_key, [])) if job.status in active_statuses), None)
+        last_job = next(iter(reversed(jobs_by_agent.get(target.agent_key, []))), None)
+        latest_message = next(
+            (
+                message
+                for message in reversed(self.list_messages(context.conversation.id))
+                if message.participant_id == target.id and message.message_type == MessageKind.AGENT.value
+            ),
+            None,
+        )
+
+        lines: list[str] = []
+        if active_job is not None:
+            lines.append(
+                f"{target.display_name} ainda nao finalizou. O worker atual esta em `{active_job.status}` com resumo: {active_job.summary}"
+            )
+        elif latest_message is not None:
+            preview = latest_message.content.strip().splitlines()
+            snippet = " ".join(preview[1:] if len(preview) > 1 else preview)[:280]
+            lines.append(f"Ultima resposta registrada de {target.display_name}: {snippet}")
+        elif last_job is not None and last_job.status == JobStatus.FAILED.value:
+            error = (last_job.last_error or "").strip() or "The previous turn failed before a final response was produced."
+            lines.append(f"{target.display_name} nao conseguiu concluir o ultimo turno. Motivo registrado: {error}")
+        else:
+            lines.append(f"Ainda nao existe uma resposta final registrada de {target.display_name} nesta conversa.")
+
+        if any(token in text for token in direct_tokens):
+            lines.append(
+                "Para falar diretamente com esse agente, mencione `@specialist` ou escreva algo como `Agent Specialist, analise este frontend...`."
+            )
+        elif target.agent_key:
+            lines.append(
+                f"Se quiser falar direto com ele no proximo turno, mencione `@{target.agent_key}` ou use o nome `{target.display_name}` no pedido."
+            )
+
+        return self.add_message(
+            conversation_id=context.conversation.id,
+            author_name=context.principal.display_name,
+            author_kind=ParticipantKind.AGENT.value,
+            content="\n\n".join(lines),
+            message_type=MessageKind.AGENT.value,
+            participant_id=context.principal.id,
+            metadata={"localStatusReply": True, "targetAgentKey": target.agent_key},
+        )
 
     def _ensure_agent_with_handoff(
         self,
@@ -558,7 +776,7 @@ class ConversationService:
                 conversation_id=context.conversation.id,
                 author_name=context.principal.display_name,
                 author_kind=ParticipantKind.AGENT.value,
-                content=f"[Agent Principal] Added {participant.display_name} to the room.",
+                content=f"Added {participant.display_name} to the room.",
                 message_type=MessageKind.AGENT.value,
                 participant_id=context.principal.id,
                 metadata={"agentKey": participant.agent_key},

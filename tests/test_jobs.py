@@ -43,6 +43,20 @@ class SlowProvider:
         return ProviderResult(text=f"[{role_name}] done"), thread_id or f"slow-{role_name}"
 
 
+class FailingProvider:
+    async def complete(
+        self,
+        *,
+        role_name: str,
+        instructions: str,
+        prompt: str,
+        thread_id: str | None = None,
+        cwd: str | None = None,
+        event_handler=None,
+    ) -> tuple[ProviderResult, str | None]:
+        raise RuntimeError("The Codex bridge timed out while waiting for a response.")
+
+
 @pytest.mark.asyncio
 async def test_handle_user_message_acks_and_enqueues_jobs_immediately(db_session: Session):
     project = ProjectService(db_session).seed_default_project()
@@ -165,6 +179,116 @@ async def test_enqueue_is_idempotent_for_same_worker_turn(db_session: Session):
     assert created_two is False
     assert job_one.id == job_two.id
     assert len(service.jobs.list_for_conversation(conversation.id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_status_question_about_running_specialist_is_answered_locally(db_session: Session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Local status reply", project_id=project.id, user_name="Elian")
+    specialist = service.add_agent(conversation.id, "specialist")
+    service.jobs.enqueue(
+        conversation_id=conversation.id,
+        worker_key="specialist",
+        agent_key="specialist",
+        participant_id=specialist.id,
+        source_message_id="source-1",
+        task_id=None,
+        summary="Agent Specialist is reviewing the frontend layout.",
+        idempotency_key="status-check-running-specialist",
+        payload={"prompt": "review the frontend"},
+    )
+    db_session.commit()
+
+    jobs_before = len(service.jobs.list_for_conversation(conversation.id))
+    messages = await service.handle_user_message(
+        conversation.id,
+        content="ele finalizou? oq ele disse? como eu faço para falar diretamente com ele?",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    jobs_after = len(service.jobs.list_for_conversation(conversation.id))
+    reply = messages[-1].content
+    assert jobs_after == jobs_before
+    assert "ainda nao finalizou" in reply.lower()
+    assert "@specialist" in reply
+
+
+@pytest.mark.asyncio
+async def test_task_status_question_is_answered_locally_without_provider_turn(db_session: Session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Task status reply", project_id=project.id, user_name="Elian")
+    service.tasks.create_simple_task(
+        conversation_id=conversation.id,
+        project_id=project.id,
+        title="Frontend polish",
+        goal="Improve the frontend polish",
+        assigned_agent_key="specialist",
+    )
+    db_session.commit()
+
+    jobs_before = len(service.jobs.list_for_conversation(conversation.id))
+    messages = await service.handle_user_message(
+        conversation.id,
+        content="Eai mano, vc lembra da nossa conversa e sabe me dizer temos task aberta ja?",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    jobs_after = len(service.jobs.list_for_conversation(conversation.id))
+    reply = messages[-1].content.lower()
+    assert jobs_after == jobs_before
+    assert "ja existe trabalho aberto" in reply
+    assert "frontend polish" in reply
+
+
+@pytest.mark.asyncio
+async def test_specialist_failure_is_reported_by_specialist_and_principal(db_session: Session):
+    project = ProjectService(db_session).seed_default_project()
+    conversation_service = ConversationService(db_session, FailingProvider())
+    conversation = conversation_service.create_conversation(title="Failure follow up", project_id=project.id, user_name="Elian")
+    specialist = conversation_service.add_agent(conversation.id, "specialist")
+    task = conversation_service.tasks.create_simple_task(
+        conversation_id=conversation.id,
+        project_id=project.id,
+        title="Frontend review",
+        goal="Review the frontend",
+        assigned_agent_key="specialist",
+    )
+    job, _ = conversation_service.jobs.enqueue(
+        conversation_id=conversation.id,
+        worker_key="specialist",
+        agent_key="specialist",
+        participant_id=specialist.id,
+        task_id=task.id,
+        summary="Agent Specialist is reviewing the frontend layout.",
+        source_message_id="source-specialist-failure",
+        idempotency_key="source-specialist-failure",
+        payload={"prompt": "Review the frontend"},
+    )
+    db_session.commit()
+
+    await conversation_service.process_job(job.id, worker_id="test-worker")
+    db_session.commit()
+
+    messages = conversation_service.list_messages(conversation.id)
+    assert any(
+        message.author_name == "Agent Specialist"
+        and "provider failed" in message.content
+        and "timed out" in message.content.lower()
+        for message in messages
+    )
+    assert any(
+        message.author_name == "Agent Principal"
+        and "execution problem" in message.content.lower()
+        and "@specialist" in message.content
+        for message in messages
+    )
+    refreshed_task = conversation_service.tasks.get(task.id)
+    assert refreshed_task is not None
+    assert refreshed_task.status == "failed"
 
 
 @pytest.mark.asyncio

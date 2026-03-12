@@ -1,13 +1,15 @@
 # Validation
 
-This repository was validated with:
+This cycle focused on responsiveness, visible progress, and explicit worker execution.
+
+Validation was performed against:
 
 - PostgreSQL in Docker
 - the real `codex-runtime-bridge`
 - the official Codex runtime behind that bridge
 - Marrowy terminal console
 - Marrowy browser UI
-- automated tests, including Playwright browser E2E
+- automated tests, including browser E2E
 
 ## Automated Validation
 
@@ -15,105 +17,159 @@ Commands used:
 
 ```bash
 source .venv/bin/activate
-pytest
-playwright install chromium
-pytest -q tests/e2e/test_browser_ui.py
+pytest -q
+bash scripts/browser_e2e.sh
 ```
 
-Result:
+Coverage added in this cycle includes:
 
-- unit tests passed
-- API tests passed
-- CLI tests passed
-- browser E2E passed
+- worker/job lifecycle
+- background execution without blocking the room
+- idempotent job enqueueing
+- idempotent onboarding / handoff
+- idempotent approvals
+- idempotent subtask decomposition
+- browser visibility for active jobs and participant activity
 
-## Real Runtime Smoke
+## Real Runtime Setup
 
-Environment:
+Environment used:
 
 - `MARROWY_DATABASE_URL=postgresql+psycopg://marrowy:marrowy@127.0.0.1:5432/marrowy`
 - `MARROWY_MODEL_PROVIDER=codex`
 - `MARROWY_CODEX_BRIDGE_URL=http://127.0.0.1:8787`
 
-Smoke outcome:
+Bridge readiness check:
 
-- Marrowy created a real conversation
-- Marrowy called the real bridge provider
-- the provider returned a real Codex response:
-  - `Agent Principal => ACK`
+```bash
+curl http://127.0.0.1:8787/readyz
+```
 
-## Manual Conversation Validation
+Result:
 
-Primary validated conversation:
+- bridge was healthy
+- Marrowy reached the real provider path successfully
 
-- conversation id: `b3b9cdf6-213e-4c42-91e1-2cac6ecdd4a9`
-- user message count: `22`
-- approval command count excluded from that total
+## Serious Terminal Validation Battery
 
-### Covered Scenarios
+Primary conversation for this cycle:
 
-1. normal conversation with `Agent Principal`
-2. creation of a real task pipeline
-3. adding `Agent Specialist`
-4. adding `Agent PO/PM`
-5. adding `Agent QA`
-6. adding `Agent GitHub`
-7. adding `Agent DevOps`
-8. onboarding / handoff in chat
-9. project diagnosis and storage-choice discussion
-10. task decomposition by `PO/PM`
-11. QA participation and validation planning
-12. GitHub participation and repo-flow guidance
-13. DevOps participation and deploy-risk guidance
-14. separate follow-up task creation
-15. task-board summary in chat
-16. policy-aware production deployment request
-17. approval resolution in terminal
-18. post-approval state summary
-19. creation of a brand-new second MVP idea in the same conversation
-20. creation of a second project pipeline for that new MVP
-21. evolution of the second MVP by deferring due dates and ownership
-22. browser inspection of the resulting conversation state
+- conversation id: `33d6ec1d-b1e2-4c57-a018-2a1e2108c615`
+- user message count: `20`
+- approval commands excluded from the count
+
+### Validation Goal
+
+Prove that the system:
+
+- acknowledges the user immediately
+- stays responsive while work is ongoing
+- shows visible activity instead of silent waiting
+- handles approvals while jobs remain pending
+- coordinates multiple visible agents on top of explicit workers
 
 ### Representative User Messages
 
-Examples from the validated session:
+The following requests were sent manually in the terminal:
 
-- `Hi Principal, can you summarize how you work in this room?`
-- `Please create the task pipeline for a basic single-user web todo MVP with diagnosis, implementation, QA, and deploy readiness.`
-- `Add Agent Specialist and give them a short handoff for the active pipeline.`
-- `Please ask Agent Specialist to diagnose the best storage choice for v1.`
-- `Please ask Agent PO/PM to refine the MVP into small incremental steps.`
-- `Please create a separate task for browser UI polish after the core todo flow.`
-- `Please have DevOps explain the main production risks before deploy.`
-- `Please prepare a production deployment for the active MVP pipeline.`
-- `Create another project pipeline for the mini release checklist app in this same conversation.`
-- `Please evolve the release checklist MVP so due dates and ownership exist only as deferred follow-on scope, not in v1.`
+1. `Hi Principal, explain how agents and workers differ in this room and how you will keep me updated while work is happening.`
+2. `Please create the task pipeline for a release checklist MVP with diagnosis, implementation, QA, and deploy readiness.`
+3. `Add Agent PO/PM.`
+4. `Ask Agent PO/PM to refine the release checklist MVP into small incremental steps with explicit subtasks.`
+5. `Add Agent Specialist.`
+6. `Add Agent QA.`
+7. `Add Agent GitHub.`
+8. `Add Agent DevOps.`
+9. `Summarize the current active jobs, visible activity, and any blocked state.`
+10. `Create a separate follow-up task for browser UX polish after the main release checklist work.`
+11. `Please prepare a production deployment for the active pipeline.`
+12. `Summarize what changed in task state after the approval flow.`
+13. `Create another project pipeline for a personal notes MVP.`
+14. `Ask Agent PO/PM to decompose the personal notes MVP into small incremental steps with subtasks.`
+15. `Ask Agent Specialist to diagnose persistence choices for the notes MVP.`
+16. `Give me a concise room status update.`
+17. `Ask Agent QA for the minimum test plan for the notes MVP.`
+18. `Ask Agent GitHub for the branch and PR strategy for the notes MVP.`
+19. `Ask Agent DevOps for the environment assumptions before production.`
+20. `Summarize the visible task board at the end of this validation.`
+
+Approval command used during the session:
+
+- `/approve 10e5255e-bc54-436d-a327-15f260920b7a`
+
+That command is intentionally excluded from the 20-message count.
+
+## Terminal UX Findings
+
+Observed positive behavior:
+
+- the Agent Principal ACK was immediate after each user message
+- the room accepted another user message while a worker was still running
+- job state became visible through console updates such as:
+  - `job.queued`
+  - `job.started`
+  - participant activity updates
+- users no longer had to wait in silence for the final provider answer
+
+This cycle therefore improved perceived responsiveness in a meaningful way.
 
 ## Browser Validation
 
-The conversation above was opened in the browser UI at:
+The same real conversation was opened in the browser UI and inspected live.
+
+Example URL:
 
 ```text
-http://127.0.0.1:8000/conversations/b3b9cdf6-213e-4c42-91e1-2cac6ecdd4a9
+http://127.0.0.1:8012/conversations/33d6ec1d-b1e2-4c57-a018-2a1e2108c615
 ```
 
-Confirmed in the UI:
+Confirmed in the browser:
 
-- multi-agent transcript visible
-- participants list visible
-- pending approvals visible
-- task board visible with cards by status
-- second pipeline visible in the board
+- live transcript with ACK + multi-agent messages
+- participant list with activity states such as:
+  - `queued`
+  - `working`
+  - `idle`
+- `Active Jobs` panel visible
+- pending approval visible with action buttons
+- task board visible with pipeline and subtask state
+- blocked / waiting state surfaced in the room instead of hidden behind provider latency
 
-## Findings From Real Validation
+## Bugs Found During Real Validation
 
-Issues found and addressed during implementation:
+The validation battery surfaced several issues that were fixed in this cycle:
 
-- duplicate pipeline creation on coordination-only prompts
-- specialists auto-invoked too aggressively by keyword heuristics
-- duplicate approval creation for repeated deploy requests
-- QA and DevOps task statuses jumped too far automatically
-- browser UI needed a direct conversation creation flow
+1. deploy prompts created duplicate pipelines
+   - fixed by reusing the active root task unless the user is clearly starting a new project
 
-These fixes are included in the current repository state.
+2. decomposition could target the wrong pipeline
+   - fixed by selecting the most relevant root task instead of blindly using the first one
+
+3. repeated deploy requests created duplicate approvals
+   - fixed with explicit approval idempotency keys
+
+4. the room could feel stalled while provider turns were executing
+   - fixed with immediate ACK, explicit jobs, and participant activity visibility
+
+5. onboarding / handoff could be repeated
+   - fixed with idempotent agent addition and dedicated onboarding flow
+
+## Residual Tradeoffs
+
+These are known and acceptable for the current stage:
+
+- workers are still a DB-backed Python runner, not a distributed queue
+- specialist execution is still Codex-backed logical-role execution, not separate agent processes
+- the Active Jobs panel can get noisy when many Principal follow-up turns are queued
+- WhatsApp relay support exists, but the deepest validation for this cycle focused on terminal + browser responsiveness
+
+## Conclusion
+
+This cycle met its validation goals:
+
+- workers exist as explicit execution units
+- the chat remains responsive while work is pending
+- the user gets immediate feedback
+- long-running work no longer leaves the room silently stuck
+- approvals can coexist with ongoing background execution
+- browser and terminal both expose visible progress

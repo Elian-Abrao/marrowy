@@ -86,6 +86,36 @@ async def test_follow_up_coordination_does_not_duplicate_pipeline(db_session):
 
 
 @pytest.mark.asyncio
+async def test_repeated_agent_addition_does_not_duplicate_handoff_or_participant(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Onboarding dedupe", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Add Agent QA and give them a short onboarding handoff for the active pipeline.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Add Agent QA and give them a short onboarding handoff for the active pipeline.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    participants = [item for item in service.list_participants(conversation.id) if item.agent_key == "qa"]
+    handoffs = [
+        message
+        for message in service.list_messages(conversation.id)
+        if message.message_type == "handoff" and message.metadata_json.get("handoffFor") == "qa"
+    ]
+
+    assert len(participants) == 1
+    assert len(handoffs) == 1
+
+
+@pytest.mark.asyncio
 async def test_repeated_deploy_requests_do_not_duplicate_pending_approvals(db_session):
     project = ProjectService(db_session).seed_default_project()
     service = ConversationService(db_session, FakeProvider())
@@ -137,3 +167,56 @@ async def test_qa_and_devops_statuses_do_not_jump_to_done_or_deploying(db_sessio
     devops_task = next(task for task in tasks if task.assigned_agent_key == "devops")
     assert qa_task.status == "testing"
     assert devops_task.status == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_deploy_request_reuses_active_pipeline_instead_of_creating_new_one(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Deploy reuse", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Please create the task pipeline for a release checklist MVP.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Please prepare a production deployment for the active pipeline.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    root_tasks = [task for task in service.tasks.list_for_conversation(conversation.id) if task.parent_task_id is None]
+    assert len(root_tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_decomposition_targets_the_named_pipeline(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Targeted decomposition", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Please create the task pipeline for a release checklist MVP.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Create another project pipeline for a personal notes MVP.",
+        user_name="Elian",
+    )
+    await service.handle_user_message(
+        conversation.id,
+        content="Please ask Agent PO/PM to decompose the personal notes MVP into small incremental steps with subtasks.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    tasks = service.tasks.list_for_conversation(conversation.id)
+    notes_root = next(task for task in tasks if task.parent_task_id is None and "notes" in task.title.lower())
+    note_subtasks = [task for task in tasks if task.parent_task_id == notes_root.id and task.kind == "subtask"]
+    assert len(note_subtasks) == 4

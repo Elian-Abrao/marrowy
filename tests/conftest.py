@@ -41,7 +41,7 @@ def db_session(tmp_path) -> Generator[Session, None, None]:
 
 @pytest.fixture()
 def app(db_session: Session):
-    app = create_app()
+    app = create_app(start_job_runner=False)
 
     def _get_db():
         yield db_session

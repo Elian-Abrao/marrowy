@@ -39,6 +39,11 @@ def test_project_and_conversation_api_flow(client, db_session):
     participants = client.get(f"/api/conversations/{conversation['id']}/participants").json()
     keys = {participant["agent_key"] for participant in participants if participant["agent_key"]}
     assert {"principal", "qa"}.issubset(keys)
+    assert any(participant["activity_state"] == "queued" for participant in participants if participant["agent_key"] == "principal")
+
+    jobs = client.get(f"/api/conversations/{conversation['id']}/jobs").json()
+    assert jobs
+    assert any(job["worker_key"] == "summary" for job in jobs)
 
 
 def test_whatsapp_channel_inbound(client, db_session):

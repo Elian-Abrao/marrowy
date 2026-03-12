@@ -61,6 +61,8 @@ def test_browser_ui_flow(tmp_path):
             assert "Agent Principal" in body
             assert "Task Board" in body
             assert "Agent QA" in body
+            assert "Active Jobs" in body
+            assert "queued" in body or "idle" in body or "working" in body
             browser.close()
     finally:
         server.terminate()

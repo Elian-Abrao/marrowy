@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from marrowy.db.models import Conversation
+from marrowy.db.models import ConversationMessage
 from marrowy.providers.base import ModelProvider
 from marrowy.services.conversations import ConversationService
 
@@ -23,7 +25,7 @@ class WhatsAppConversationAdapter:
         self.service = ConversationService(db, provider)
         self.db = db
 
-    async def handle(self, payload: WhatsAppInboundMessage) -> list[str]:
+    def get_or_create_conversation(self, payload: WhatsAppInboundMessage) -> Conversation:
         conversation = next(
             (
                 item
@@ -41,6 +43,10 @@ class WhatsAppConversationAdapter:
                 user_name=payload.sender_name,
             )
             self.db.commit()
+        return conversation
+
+    async def handle(self, payload: WhatsAppInboundMessage) -> list[ConversationMessage]:
+        conversation = self.get_or_create_conversation(payload)
         messages = await self.service.handle_user_message(conversation.id, content=payload.text, user_name=payload.sender_name)
         self.db.commit()
-        return [message.content for message in messages[1:]]
+        return messages[1:]

@@ -54,6 +54,9 @@ class ParticipantRead(ORMModel):
     bridge_thread_id: str | None = None
     joined_at: datetime
     is_active: bool
+    activity_state: str
+    activity_summary: str | None = None
+    last_activity_at: datetime | None = None
 
 
 class AddAgentRequest(BaseModel):

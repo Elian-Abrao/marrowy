@@ -22,6 +22,7 @@ class MessageKind(StrEnum):
     AGENT = "agent"
     SYSTEM = "system"
     APPROVAL = "approval"
+    HANDOFF = "handoff"
 
 
 class TaskStatus(StrEnum):
@@ -41,12 +42,31 @@ class TaskKind(StrEnum):
     SIMPLE = "simple"
     PIPELINE = "pipeline"
     STAGE = "stage"
+    SUBTASK = "subtask"
 
 
 class ApprovalStatus(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+
+
+class ParticipantActivityState(StrEnum):
+    IDLE = "idle"
+    QUEUED = "queued"
+    WORKING = "working"
+    WAITING = "waiting"
+    ERROR = "error"
+
+
+class JobStatus(StrEnum):
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    WAITING = "waiting"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class MemoryScope(StrEnum):

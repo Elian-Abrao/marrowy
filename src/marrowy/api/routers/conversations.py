@@ -17,6 +17,7 @@ from marrowy.schemas.approvals import ApprovalResolve
 from marrowy.schemas.conversations import AddAgentRequest
 from marrowy.schemas.conversations import ConversationCreate
 from marrowy.schemas.conversations import ConversationRead
+from marrowy.schemas.jobs import JobRead
 from marrowy.schemas.conversations import MessageCreate
 from marrowy.schemas.conversations import MessageRead
 from marrowy.schemas.conversations import ParticipantRead
@@ -67,6 +68,11 @@ def list_participants(conversation_id: str, service: ConversationService = Depen
 @router.get("/{conversation_id}/tasks", response_model=list[TaskRead])
 def list_tasks(conversation_id: str, tasks: TaskService = Depends(get_task_service)) -> list[TaskRead]:
     return [TaskRead.model_validate(item) for item in tasks.list_for_conversation(conversation_id)]
+
+
+@router.get("/{conversation_id}/jobs", response_model=list[JobRead])
+def list_jobs(conversation_id: str, service: ConversationService = Depends(get_conversation_service)) -> list[JobRead]:
+    return [JobRead.model_validate(item) for item in service.jobs.list_for_conversation(conversation_id)]
 
 
 @router.post("/{conversation_id}/messages", response_model=list[MessageRead])
@@ -122,14 +128,14 @@ async def stream_events(
     db: Session = Depends(get_db),
 ) -> EventSourceResponse:
     async def event_source():
-        last_seen: str | None = None
+        seen_ids: set[str] = set()
         while True:
             stmt = select(DomainEvent).where(DomainEvent.conversation_id == conversation_id).order_by(DomainEvent.created_at)
             rows = list(db.scalars(stmt))
             for event in rows:
-                if last_seen is not None and event.id <= last_seen:
+                if event.id in seen_ids:
                     continue
-                last_seen = event.id
+                seen_ids.add(event.id)
                 payload = {
                     "id": event.id,
                     "eventType": event.event_type,
@@ -137,6 +143,6 @@ async def stream_events(
                     "createdAt": event.created_at.isoformat(),
                 }
                 yield {"event": event.event_type, "data": json.dumps(payload)}
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.4)
 
     return EventSourceResponse(event_source())

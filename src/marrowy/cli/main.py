@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import Optional
 
 import typer
 import uvicorn
 
+from marrowy.api.deps import build_provider
 from marrowy.api.app import create_app
 from marrowy.core.logging import configure_logging
 from marrowy.core.settings import get_settings
 from marrowy.db.base import Base
+from marrowy.db.models import ConversationMessage
+from marrowy.db.models import DomainEvent
 from marrowy.db.session import SessionLocal
 from marrowy.db.session import engine
 from marrowy.integrations.whatsapp_relay import WhatsAppRelay
 from marrowy.providers.codex_bridge import CodexBridgeProvider
 from marrowy.providers.fake import FakeProvider
 from marrowy.services.conversations import ConversationService
+from marrowy.services.job_runner import JobRunner
 from marrowy.services.projects import ProjectService
 
 app = typer.Typer(help="Marrowy CLI")
@@ -76,7 +81,15 @@ def whatsapp_relay(
 
 async def _console(*, conversation_id: str | None, project_slug: str | None, user_name: str) -> None:
     configure_logging()
+    settings = get_settings()
+    runner = JobRunner(
+        session_factory=SessionLocal,
+        provider_factory=lambda: build_provider(settings),
+        poll_interval=0.3,
+    )
+    await runner.start()
     db = SessionLocal()
+    poller_task: asyncio.Task | None = None
     try:
         project_service = ProjectService(db)
         if conversation_id is None:
@@ -98,8 +111,9 @@ async def _console(*, conversation_id: str | None, project_slug: str | None, use
         service = ConversationService(db, provider)
         typer.echo(f"Conversation: {conversation_id}")
         typer.echo("Type /exit to leave. Use /approve <id> or /reject <id> for approvals.")
+        poller_task = asyncio.create_task(_console_poller(conversation_id))
         while True:
-            line = typer.prompt("you")
+            line = await asyncio.to_thread(typer.prompt, "you")
             if line.strip() == "/exit":
                 break
             if line.startswith("/approve ") or line.startswith("/reject "):
@@ -109,11 +123,14 @@ async def _console(*, conversation_id: str | None, project_slug: str | None, use
                 db.commit()
                 typer.echo(f"[approval] {approval.id} -> {approval.status}")
                 continue
-            messages = await service.handle_user_message(conversation_id, content=line, user_name=user_name)
+            await service.handle_user_message(conversation_id, content=line, user_name=user_name)
             db.commit()
-            for message in messages[1:]:
-                typer.echo(f"{message.author_name}: {message.content}")
     finally:
+        if poller_task is not None:
+            poller_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await poller_task
+        await runner.stop()
         db.close()
 
 
@@ -138,6 +155,13 @@ async def _whatsapp_relay(
     cwd: str | None,
 ) -> None:
     configure_logging()
+    settings = get_settings()
+    runner = JobRunner(
+        session_factory=SessionLocal,
+        provider_factory=lambda: build_provider(settings),
+        poll_interval=0.3,
+    )
+    await runner.start()
     db = SessionLocal()
     try:
         provider = _build_provider()
@@ -160,4 +184,49 @@ async def _whatsapp_relay(
         )
         await relay.run()
     finally:
+        await runner.stop()
         db.close()
+
+
+async def _console_poller(conversation_id: str) -> None:
+    db = SessionLocal()
+    try:
+        last_message_count = db.query(DomainEvent).count()
+        last_chat_count = db.query(ConversationMessage).filter(ConversationMessage.conversation_id == conversation_id).count()
+    finally:
+        db.close()
+    while True:
+        await asyncio.sleep(0.3)
+        db = SessionLocal()
+        try:
+            messages = (
+                db.query(ConversationMessage)
+                .filter(ConversationMessage.conversation_id == conversation_id)
+                .order_by(ConversationMessage.created_at)
+                .all()
+            )
+            if len(messages) > last_chat_count:
+                for message in messages[last_chat_count:]:
+                    if message.author_kind == "user":
+                        continue
+                    typer.echo(f"{message.author_name}: {message.content}")
+                last_chat_count = len(messages)
+            events = list(
+                db.query(DomainEvent)
+                .filter(DomainEvent.conversation_id == conversation_id)
+                .order_by(DomainEvent.created_at)
+            )
+            new_events = events[last_message_count:]
+            for event in new_events:
+                if event.event_type.startswith("job.") and event.event_type not in {"job.completed"}:
+                    summary = event.payload_json.get("summary") or event.payload_json.get("text")
+                    if summary:
+                        typer.echo(f"[{event.event_type}] {summary}")
+                if event.event_type == "participant.activity.updated":
+                    summary = event.payload_json.get("activitySummary")
+                    display = event.payload_json.get("displayName")
+                    if display and summary:
+                        typer.echo(f"[activity] {display}: {summary}")
+            last_message_count = len(events)
+        finally:
+            db.close()

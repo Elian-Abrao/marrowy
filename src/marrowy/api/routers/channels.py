@@ -44,4 +44,4 @@ async def whatsapp_inbound(
             project_id=project_id,
         )
     )
-    return {"replies": replies}
+    return {"replies": [message.content for message in replies]}

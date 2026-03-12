@@ -1,14 +1,16 @@
 async function refreshConversation(conversationId) {
-  const [messagesRes, tasksRes, participantsRes, approvalsRes] = await Promise.all([
+  const [messagesRes, tasksRes, participantsRes, approvalsRes, jobsRes] = await Promise.all([
     fetch(`/api/conversations/${conversationId}/messages`),
     fetch(`/api/conversations/${conversationId}/tasks`),
     fetch(`/api/conversations/${conversationId}/participants`),
     fetch(`/api/conversations/${conversationId}/approvals`),
+    fetch(`/api/conversations/${conversationId}/jobs`),
   ]);
   const messages = await messagesRes.json();
   const tasks = await tasksRes.json();
   const participants = await participantsRes.json();
   const approvals = await approvalsRes.json();
+  const jobs = await jobsRes.json();
 
   const log = document.getElementById("chat-log");
   if (log) {
@@ -23,7 +25,13 @@ async function refreshConversation(conversationId) {
 
   const participantsList = document.getElementById("participants-list");
   if (participantsList) {
-    participantsList.innerHTML = participants.map((participant) => `<li>${participant.display_name}</li>`).join("");
+    participantsList.innerHTML = participants.map((participant) => `
+      <li>
+        <strong>${participant.display_name}</strong><br>
+        <span class="muted">${participant.activity_state}</span>
+        ${participant.activity_summary ? `<div class="muted">${participant.activity_summary}</div>` : ""}
+      </li>
+    `).join("");
   }
 
   const approvalsList = document.getElementById("approvals-list");
@@ -53,6 +61,20 @@ async function refreshConversation(conversationId) {
         `).join("")}
       </section>
     `).join("");
+  }
+
+  const jobsList = document.getElementById("jobs-list");
+  if (jobsList) {
+    const activeJobs = jobs.filter((job) => ["queued","claimed","running","waiting"].includes(job.status));
+    jobsList.innerHTML = activeJobs.length
+      ? activeJobs.map((job) => `
+        <li>
+          <strong>${job.summary}</strong><br>
+          <span class="muted">${job.worker_key} · ${job.status}</span>
+          ${job.result_json?.latest ? `<div class="muted">${job.result_json.latest}</div>` : ""}
+        </li>
+      `).join("")
+      : `<li class="muted">No active jobs.</li>`;
   }
 }
 
@@ -124,6 +146,24 @@ document.addEventListener("DOMContentLoaded", () => {
     await refreshConversation(conversationId);
   });
   stream.addEventListener("approval.requested", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("job.queued", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("job.started", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("job.progress", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("job.completed", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("job.failed", async () => {
+    await refreshConversation(conversationId);
+  });
+  stream.addEventListener("participant.activity.updated", async () => {
     await refreshConversation(conversationId);
   });
 });

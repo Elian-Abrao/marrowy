@@ -21,6 +21,7 @@ class TaskRead(ORMModel):
     order_index: int
     details_markdown: str | None = None
     result_markdown: str | None = None
+    idempotency_key: str | None = None
     created_at: datetime
     updated_at: datetime
 

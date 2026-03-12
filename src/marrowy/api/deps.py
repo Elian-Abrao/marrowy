@@ -17,7 +17,7 @@ def get_app_settings() -> Settings:
     return get_settings()
 
 
-def get_provider(settings: Settings = Depends(get_app_settings)):
+def build_provider(settings: Settings):
     if settings.model_provider == "fake":
         return FakeProvider()
     return CodexBridgeProvider(
@@ -25,6 +25,10 @@ def get_provider(settings: Settings = Depends(get_app_settings)):
         approval_policy=settings.codex_approval_policy,
         sandbox=settings.codex_sandbox,
     )
+
+
+def get_provider(settings: Settings = Depends(get_app_settings)):
+    return build_provider(settings)
 
 
 def get_project_service(db: Session = Depends(get_db)) -> ProjectService:

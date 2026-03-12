@@ -26,8 +26,20 @@
       <h2>Participants</h2>
       <ul id="participants-list">
         {% for participant in participants %}
-        <li>{{ participant.display_name }}</li>
+        <li>
+          <strong>{{ participant.display_name }}</strong><br>
+          <span class="muted">{{ participant.activity_state }}</span>
+          {% if participant.activity_summary %}
+          <div class="muted">{{ participant.activity_summary }}</div>
+          {% endif %}
+        </li>
         {% endfor %}
+      </ul>
+    </article>
+    <article class="panel">
+      <h2>Active Jobs</h2>
+      <ul id="jobs-list">
+        <li class="muted">Loading active jobs...</li>
       </ul>
     </article>
     <article class="panel">

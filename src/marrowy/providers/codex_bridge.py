@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import asyncio
 
 import httpx
 
@@ -22,6 +23,7 @@ class CodexBridgeProvider:
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         payload: dict[str, object] = {
             "prompt": self._build_prompt(role_name=role_name, instructions=instructions, prompt=prompt),
@@ -61,14 +63,31 @@ class CodexBridgeProvider:
                     event_type = event.get("event") or current_event
                     if event_type == "commentary" and isinstance(event.get("text"), str):
                         commentary.append(event["text"])
+                        if event_handler is not None:
+                            maybe = event_handler("commentary", event["text"])
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
                     elif event_type == "action" and isinstance(event.get("text"), str):
                         actions.append(event["text"])
+                        if event_handler is not None:
+                            maybe = event_handler("action", event["text"])
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
+                    elif event_type == "status" and isinstance(event.get("text"), str):
+                        if event_handler is not None:
+                            maybe = event_handler("status", event["text"])
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
                     elif event_type == "final":
                         final_event = event
                         if isinstance(event.get("text"), str):
                             final_text = event["text"]
                         if isinstance(event.get("threadId"), str):
                             thread_value = event["threadId"]
+                        if event_handler is not None and final_text:
+                            maybe = event_handler("final", final_text)
+                            if asyncio.iscoroutine(maybe):
+                                await maybe
                     elif event_type == "error":
                         message = event.get("message") or "consumer stream error"
                         raise RuntimeError(str(message))

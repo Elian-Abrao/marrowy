@@ -111,6 +111,9 @@ class ConversationParticipant(Base):
     bridge_thread_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(), default=_now)
     is_active: Mapped[bool] = mapped_column(Boolean(), default=True)
+    activity_state: Mapped[str] = mapped_column(String(40), default="idle", index=True)
+    activity_summary: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="participants")
     messages: Mapped[list["ConversationMessage"]] = relationship(back_populates="participant")
@@ -150,6 +153,7 @@ class Task(Base):
     details_markdown: Mapped[str | None] = mapped_column(Text(), nullable=True)
     result_markdown: Mapped[str | None] = mapped_column(Text(), nullable=True)
     created_by_message_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(), default=_now, onupdate=_now)
 
@@ -168,11 +172,41 @@ class ApprovalRequest(Base):
     requested_by_agent_key: Mapped[str] = mapped_column(String(40))
     summary: Mapped[str] = mapped_column(Text())
     details_json: Mapped[dict] = mapped_column(JSON(), default=dict)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     resolved_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(), default=_now)
 
     conversation: Mapped[Conversation] = relationship(back_populates="approvals")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_participants.id"), nullable=True, index=True)
+    source_message_id: Mapped[str | None] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True, index=True)
+    worker_key: Mapped[str] = mapped_column(String(80), index=True)
+    agent_key: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True)
+    summary: Mapped[str] = mapped_column(String(240))
+    payload_json: Mapped[dict] = mapped_column(JSON(), default=dict)
+    result_json: Mapped[dict] = mapped_column(JSON(), default=dict)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    priority: Mapped[int] = mapped_column(Integer(), default=100)
+    available_at: Mapped[datetime] = mapped_column(DateTime(), default=_now, index=True)
+    claim_token: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer(), default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer(), default=3)
+    last_error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(), default=_now, onupdate=_now)
 
 
 class DomainEvent(Base):

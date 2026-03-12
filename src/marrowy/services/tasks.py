@@ -22,6 +22,16 @@ class TaskService:
     def get(self, task_id: str) -> Task | None:
         return self.db.get(Task, task_id)
 
+    def list_subtasks(self, parent_task_id: str) -> list[Task]:
+        stmt = select(Task).where(Task.parent_task_id == parent_task_id).order_by(Task.order_index, Task.created_at)
+        return list(self.db.scalars(stmt))
+
+    def find_active_by_idempotency(self, *, conversation_id: str | None, idempotency_key: str) -> Task | None:
+        stmt = select(Task).where(Task.idempotency_key == idempotency_key)
+        if conversation_id is not None:
+            stmt = stmt.where(Task.conversation_id == conversation_id)
+        return self.db.scalar(stmt.order_by(Task.created_at.desc()))
+
     def create_simple_task(
         self,
         *,
@@ -33,7 +43,12 @@ class TaskService:
         scope: str | None = None,
         details_markdown: str | None = None,
         created_by_message_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> Task:
+        if idempotency_key:
+            existing = self.find_active_by_idempotency(conversation_id=conversation_id, idempotency_key=idempotency_key)
+            if existing is not None:
+                return existing
         task = Task(
             conversation_id=conversation_id,
             project_id=project_id,
@@ -45,6 +60,7 @@ class TaskService:
             assigned_agent_key=assigned_agent_key,
             details_markdown=details_markdown,
             created_by_message_id=created_by_message_id,
+            idempotency_key=idempotency_key,
         )
         self.db.add(task)
         self.db.flush()
@@ -60,7 +76,12 @@ class TaskService:
         goal: str,
         template_name: str = "default_delivery",
         created_by_message_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> tuple[Task, list[Task]]:
+        if idempotency_key:
+            existing = self.find_active_by_idempotency(conversation_id=conversation_id, idempotency_key=idempotency_key)
+            if existing is not None:
+                return existing, self.list_subtasks(existing.id)
         root = Task(
             conversation_id=conversation_id,
             project_id=project_id,
@@ -69,6 +90,7 @@ class TaskService:
             status=TaskStatus.PLANNED.value,
             kind=TaskKind.PIPELINE.value,
             created_by_message_id=created_by_message_id,
+            idempotency_key=idempotency_key,
         )
         self.db.add(root)
         self.db.flush()
@@ -95,6 +117,7 @@ class TaskService:
                 kind=TaskKind.STAGE.value,
                 assigned_agent_key=stage.get("assignedAgent"),
                 order_index=index,
+                idempotency_key=f"{root.id}:stage:{index}",
             )
             self.db.add(task)
             stages.append(task)
@@ -102,7 +125,72 @@ class TaskService:
         self.events.emit("task.created", conversation_id=conversation_id, task_id=root.id, payload={"taskId": root.id, "pipeline": True})
         return root, stages
 
+    def create_subtask(
+        self,
+        *,
+        conversation_id: str | None,
+        project_id: str | None,
+        parent_task_id: str,
+        title: str,
+        goal: str,
+        assigned_agent_key: str | None = None,
+        order_index: int = 0,
+        details_markdown: str | None = None,
+        created_by_message_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> Task:
+        if idempotency_key:
+            existing = self.find_active_by_idempotency(conversation_id=conversation_id, idempotency_key=idempotency_key)
+            if existing is not None:
+                return existing
+        task = Task(
+            conversation_id=conversation_id,
+            project_id=project_id,
+            parent_task_id=parent_task_id,
+            title=title,
+            goal=goal,
+            status=TaskStatus.CREATED.value,
+            kind=TaskKind.SUBTASK.value,
+            assigned_agent_key=assigned_agent_key,
+            order_index=order_index,
+            details_markdown=details_markdown,
+            created_by_message_id=created_by_message_id,
+            idempotency_key=idempotency_key,
+        )
+        self.db.add(task)
+        self.db.flush()
+        self.events.emit("task.created", conversation_id=conversation_id, task_id=task.id, payload={"taskId": task.id, "parentTaskId": parent_task_id, "kind": "subtask"})
+        return task
+
+    def ensure_subtasks(
+        self,
+        *,
+        conversation_id: str | None,
+        project_id: str | None,
+        parent_task_id: str,
+        items: list[dict[str, str | int | None]],
+        created_by_message_id: str | None = None,
+    ) -> list[Task]:
+        created: list[Task] = []
+        for index, item in enumerate(items):
+            title = str(item["title"])
+            task = self.create_subtask(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                parent_task_id=parent_task_id,
+                title=title,
+                goal=str(item.get("goal") or title),
+                assigned_agent_key=item.get("assigned_agent_key"),
+                order_index=int(item.get("order_index") or index),
+                created_by_message_id=created_by_message_id,
+                idempotency_key=f"{parent_task_id}:subtask:{index}:{title.lower().strip()}",
+            )
+            created.append(task)
+        return created
+
     def set_status(self, task: Task, status: TaskStatus, *, result_markdown: str | None = None) -> Task:
+        if not self._can_transition(task.status, status.value):
+            raise ValueError(f"invalid task transition from {task.status} to {status.value}")
         task.status = status.value
         if result_markdown is not None:
             task.result_markdown = result_markdown
@@ -114,3 +202,62 @@ class TaskService:
             payload={"taskId": task.id, "status": task.status},
         )
         return task
+
+    @staticmethod
+    def _can_transition(current: str, target: str) -> bool:
+        if current == target:
+            return True
+        allowed = {
+            TaskStatus.CREATED.value: {
+                TaskStatus.PLANNED.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.TESTING.value,
+                TaskStatus.BLOCKED.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.PLANNED.value: {
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.BLOCKED.value,
+                TaskStatus.WAITING_APPROVAL.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.IN_PROGRESS.value: {
+                TaskStatus.TESTING.value,
+                TaskStatus.BLOCKED.value,
+                TaskStatus.WAITING_APPROVAL.value,
+                TaskStatus.DONE.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.BLOCKED.value: {
+                TaskStatus.PLANNED.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.WAITING_APPROVAL.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.WAITING_APPROVAL.value: {
+                TaskStatus.PLANNED.value,
+                TaskStatus.BLOCKED.value,
+                TaskStatus.DEPLOYING.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.TESTING.value: {
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.BLOCKED.value,
+                TaskStatus.DONE.value,
+                TaskStatus.FAILED.value,
+            },
+            TaskStatus.DEPLOYING.value: {
+                TaskStatus.DONE.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.BLOCKED.value,
+            },
+            TaskStatus.FAILED.value: {
+                TaskStatus.PLANNED.value,
+                TaskStatus.IN_PROGRESS.value,
+                TaskStatus.CANCELLED.value,
+            },
+            TaskStatus.DONE.value: set(),
+            TaskStatus.CANCELLED.value: set(),
+        }
+        return target in allowed.get(current, set())

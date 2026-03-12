@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Awaitable
+from typing import Callable
 from typing import Protocol
 
 
@@ -21,4 +23,5 @@ class ModelProvider(Protocol):
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        event_handler: Callable[[str, str], Awaitable[None] | None] | None = None,
     ) -> tuple[ProviderResult, str | None]: ...

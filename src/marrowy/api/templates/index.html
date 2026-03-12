@@ -1,47 +1,60 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="grid">
-  <article class="panel">
-    <h1>Projects</h1>
-    <ul class="project-list">
-      {% for project in projects %}
-      <li>
-        <strong>{{ project.name }}</strong><br>
-        <span class="muted">{{ project.slug }}</span>
-      </li>
-      {% else %}
-      <li class="muted">No projects yet.</li>
-      {% endfor %}
-    </ul>
-  </article>
-  <article class="panel">
-    <h1>Conversations</h1>
-    <form id="conversation-create-form" class="stack-form">
-      <label>
-        Title
-        <input id="conversation-title" name="title" placeholder="Example: Build MVP roadmap">
-      </label>
-      <label>
-        Project
-        <select id="conversation-project-id" name="project_id">
-          <option value="">None</option>
-          {% for project in projects %}
-          <option value="{{ project.id }}">{{ project.name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <button type="submit">Start Conversation</button>
-    </form>
-    <ul class="conversation-list">
-      {% for conversation in conversations %}
-      <li>
-        <a href="/conversations/{{ conversation.id }}">{{ conversation.title }}</a><br>
-        <span class="muted">{{ conversation.status }} · {{ conversation.channel }}</span>
-      </li>
-      {% else %}
-      <li class="muted">No conversations yet.</li>
-      {% endfor %}
-    </ul>
-  </article>
-</section>
+<div class="home-container">
+  <div class="welcome-section">
+    <div class="welcome-header">
+      <div class="ai-badge">
+        <span class="ping"></span> System Ready
+      </div>
+      <h1>Welcome back.</h1>
+      <p>Orchestrate projects, agents, and approvals from one room.</p>
+    </div>
+
+    <div class="create-room-box glass-panel">
+      <form id="conversation-create-form" class="orchestration-form">
+        <div class="input-glass-wrapper">
+          <textarea id="conversation-title" name="title" rows="1" placeholder="What do you want to build today? Press Enter to start..." required></textarea>
+          <button type="submit" class="btn-primary icon-btn submit-room" title="Start Conversation">
+            <i data-lucide="arrow-right"></i>
+          </button>
+        </div>
+        <div class="form-options">
+          <label class="project-selector">
+            <i data-lucide="folder" class="icon-sm"></i> Project:
+            <select id="conversation-project-id" name="project_id">
+              <option value="">None</option>
+              {% for project in projects %}
+              <option value="{{ project.id }}">{{ project.name }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+      </form>
+    </div>
+
+    <div class="dashboard-stats">
+      <div class="stat-card glass-panel">
+        <div class="stat-icon"><i data-lucide="briefcase"></i></div>
+        <div class="stat-info">
+          <span class="stat-value">{{ projects|length }}</span>
+          <span class="stat-label">Projects</span>
+        </div>
+      </div>
+      <div class="stat-card glass-panel">
+        <div class="stat-icon"><i data-lucide="message-square-dashed"></i></div>
+        <div class="stat-info">
+          <span class="stat-value">{{ conversations|length }}</span>
+          <span class="stat-label">Active Rooms</span>
+        </div>
+      </div>
+      <div class="stat-card glass-panel">
+        <div class="stat-icon"><i data-lucide="bot"></i></div>
+        <div class="stat-info">
+          <span class="stat-value">6</span>
+          <span class="stat-label">Agent Roles</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}

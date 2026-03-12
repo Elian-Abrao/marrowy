@@ -1,80 +1,207 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="conversation-layout" data-conversation-id="{{ conversation.id }}">
-  <section class="panel chat-panel">
-    <div class="chat-header">
-      <h1>{{ conversation.title }}</h1>
-      <span class="muted">{{ conversation.status }}</span>
+<div class="room-container" data-conversation-id="{{ conversation.id }}">
+  <!-- Room Header -->
+  <header class="room-header glass-panel">
+    <div class="room-title-area">
+      <h2 class="room-title">{{ conversation.title }}</h2>
+      <span class="status-indicator {{ conversation.status }}" title="Status: {{ conversation.status }}"><span class="pulse"></span></span>
     </div>
-    <div id="chat-log" class="chat-log">
-      {% for message in messages %}
-      <article class="message message-{{ message.author_kind }}">
-        <header>{{ message.author_name }}</header>
-        <pre>{{ message.content }}</pre>
-      </article>
-      {% endfor %}
+    
+    <div class="room-actions">
+      <button
+        class="toggle-btn danger-btn"
+        data-delete-conversation-id="{{ conversation.id }}"
+        data-redirect-home="true"
+        title="Delete this room"
+      >
+        <i data-lucide="trash-2" class="icon-sm"></i>
+        <span>Delete Room</span>
+      </button>
+      <!-- Toggle system / progress messages -->
+      <button class="toggle-btn" id="btn-toggle-system-msgs" title="Show/Hide progress & system messages">
+        <i data-lucide="eye" class="icon-sm"></i>
+        <span>Activity</span>
+      </button>
+      <!-- Minimalist toggle buttons -->
+      <button class="toggle-btn" id="btn-toggle-agents" title="Agents & Activity">
+        <i data-lucide="cpu" class="icon-sm"></i>
+        <span class="metric-badge" data-metric="participants">{{ participants|length }}</span>
+      </button>
+      <button class="toggle-btn" id="btn-toggle-tasks" title="Task Pipeline">
+        <i data-lucide="kanban" class="icon-sm"></i>
+        <span class="metric-badge" data-metric="tasks">{{ tasks|length }}</span>
+      </button>
     </div>
-    <form id="chat-form" class="chat-form">
-      <textarea id="chat-input" name="content" placeholder="Talk to Marrowy..." rows="4"></textarea>
-      <div class="actions">
-        <button type="submit">Send</button>
-      </div>
-    </form>
-  </section>
-  <aside class="sidebar">
-    <article class="panel">
-      <h2>Participants</h2>
-      <ul id="participants-list">
-        {% for participant in participants %}
-        <li>
-          <strong>{{ participant.display_name }}</strong><br>
-          <span class="muted">{{ participant.activity_state }}</span>
-          {% if participant.activity_summary %}
-          <div class="muted">{{ participant.activity_summary }}</div>
-          {% endif %}
-        </li>
-        {% endfor %}
-      </ul>
-    </article>
-    <article class="panel">
-      <h2>Active Jobs</h2>
-      <ul id="jobs-list">
-        <li class="muted">Loading active jobs...</li>
-      </ul>
-    </article>
-    <article class="panel">
-      <h2>Pending Approvals</h2>
-      <ul id="approvals-list">
-        {% for approval in approvals %}
-        <li>
-          <strong>{{ approval.summary }}</strong><br>
-          <button data-approval-id="{{ approval.id }}" data-decision="approve">Approve</button>
-          <button data-approval-id="{{ approval.id }}" data-decision="reject">Reject</button>
-        </li>
+  </header>
+
+  <div class="room-layout">
+    <!-- Chat Feed -->
+    <section class="chat-section">
+      <div id="chat-log" class="chat-feed scrollable">
+        {% for message in messages %}
+        <article class="msg-bubble-wrapper kind-{{ message.author_kind }}" data-author-kind="{{ message.author_kind }}">
+          <div class="msg-avatar">
+            {% if message.author_kind == 'user' %}
+              <i data-lucide="user"></i>
+            {% else %}
+              <i data-lucide="bot"></i>
+            {% endif %}
+          </div>
+          <div class="msg-content-area">
+            <div class="msg-meta">
+              <span class="msg-author">{{ message.author_name }}</span>
+              <span class="msg-kind">{{ message.author_kind }}</span>
+            </div>
+            <div class="msg-bubble">
+              <pre>{{ message.content }}</pre>
+            </div>
+          </div>
+        </article>
         {% else %}
-        <li class="muted">No approvals pending.</li>
-        {% endfor %}
-      </ul>
-    </article>
-    <article class="panel">
-      <h2>Task Board</h2>
-      <div id="task-board" class="task-board">
-        {% for status in ["created","planned","in_progress","blocked","waiting_approval","testing","deploying","done","failed","cancelled"] %}
-        <section class="task-column">
-          <h3>{{ status }}</h3>
-          {% for task in tasks if task.status == status %}
-          <article class="task-card">
-            <strong>{{ task.title }}</strong><br>
-            <span class="muted">{{ task.id }}</span>
-          </article>
-          {% endfor %}
-        </section>
+        <div class="empty-feed">
+          <i data-lucide="message-square"></i>
+          <p>No messages yet. Send a prompt to start orchestrating.</p>
+        </div>
         {% endfor %}
       </div>
-    </article>
-  </aside>
+
+      <!-- Input Area -->
+      <div class="chat-input-container glass-panel">
+        <form id="chat-form" class="chat-form">
+          <textarea id="chat-input" name="content" placeholder="Type your instruction or message..." rows="1"></textarea>
+          <button type="submit" class="btn-primary icon-btn send-btn">
+            <i data-lucide="send"></i>
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Side Panel: Agents & Activity -->
+    <aside class="side-panel hidden glass-panel" id="panel-agents">
+      <div class="panel-header">
+        <h3>Agents & Activity</h3>
+        <button class="close-panel" data-target="panel-agents"><i data-lucide="x"></i></button>
+      </div>
+      <div class="panel-scroll">
+        <div class="panel-group">
+          <h4 class="group-title">Participants</h4>
+          <ul id="participants-list" class="cards-list">
+            {% for participant in participants %}
+            <li class="mini-card card-participant">
+              <div class="card-head">
+                <strong>{{ participant.display_name }}</strong>
+                <span class="status-dot {{ participant.activity_state }}"></span>
+              </div>
+              <div class="card-sub">{{ participant.activity_summary or "Idle" }}</div>
+            </li>
+            {% else %}
+            <li class="empty-item">No agents joined yet.</li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="panel-group">
+          <h4 class="group-title">Roster / Invite</h4>
+          <div id="agent-roster" class="roster-grid">
+            {% for profile in agent_profiles if profile.key != "principal" %}
+            <button type="button" class="roster-btn" data-agent-key="{{ profile.key }}" {% if profile.key in participant_agent_keys %}disabled{% endif %}>
+               <i data-lucide="plus-circle"></i> {{ profile.display_name }}
+            </button>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="panel-group">
+          <h4 class="group-title">Create New Agent</h4>
+          <form id="create-agent-form" class="compact-form">
+            <input type="text" id="new-agent-key" placeholder="agent_key (e.g. analyst)" required />
+            <input type="text" id="new-agent-name" placeholder="Display Name (e.g. Agent Analyst)" required />
+            <input type="text" id="new-agent-summary" placeholder="Summary / Role" required />
+            <textarea id="new-agent-instructions" placeholder="Instructions for the agent..." rows="2"></textarea>
+            <button type="submit" class="btn-primary btn-sm-full"><i data-lucide="user-plus"></i> Create Agent</button>
+          </form>
+        </div>
+
+        <div class="panel-group">
+          <h4 class="group-title">Background Activity (Toolcalls)</h4>
+          <ul id="jobs-list" class="cards-list">
+            <li class="empty-item">Listening for jobs...</li>
+          </ul>
+        </div>
+
+        <div class="panel-group">
+          <h4 class="group-title">Pending Approvals</h4>
+          <ul id="approvals-list" class="cards-list">
+            {% for approval in approvals %}
+            <li class="mini-card card-approval">
+              <div class="card-head"><strong>{{ approval.summary }}</strong></div>
+              <div class="approval-btns">
+                <button class="btn-sm btn-approve" data-approval-id="{{ approval.id }}" data-decision="approve"><i data-lucide="check"></i></button>
+                <button class="btn-sm btn-reject" data-approval-id="{{ approval.id }}" data-decision="reject"><i data-lucide="x"></i></button>
+              </div>
+            </li>
+            {% else %}
+            <li class="empty-item">No pending approvals.</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Side Panel: Tasks Pipeline -->
+    <aside class="side-panel hidden glass-panel panel-wide" id="panel-tasks">
+      <div class="panel-header">
+        <h3>Task Pipeline</h3>
+        <button class="close-panel" data-target="panel-tasks"><i data-lucide="x"></i></button>
+      </div>
+
+      <!-- Create Task Form -->
+      <div class="panel-group" style="padding: 16px 24px 0;">
+        <h4 class="group-title">Create Task</h4>
+        <form id="create-task-form" class="compact-form inline-form">
+          <input type="text" id="new-task-title" placeholder="Task title" required />
+          <input type="text" id="new-task-goal" placeholder="Goal / objective" required />
+          <select id="new-task-agent">
+            <option value="">Assign to...</option>
+            {% for profile in agent_profiles %}
+            <option value="{{ profile.key }}">{{ profile.display_name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn-primary btn-sm-full"><i data-lucide="plus"></i> Add Task</button>
+        </form>
+      </div>
+      <div class="panel-scroll kanban-scroll">
+        <div id="task-board" class="kanban-board">
+          {% for status in ["created","planned","in_progress","blocked","waiting_approval","testing","deploying","done","failed","cancelled"] %}
+          {% set column_tasks = tasks|selectattr("status", "equalto", status)|list %}
+          <div class="kanban-col" data-status="{{ status }}">
+            <div class="kanban-col-header">
+              <span class="col-title">{{ status|replace("_", " ")|title }}</span>
+              <span class="col-count">{{ column_tasks|length }}</span>
+            </div>
+            <div class="kanban-cards">
+              {% for task in column_tasks %}
+              <div class="kanban-card">
+                <div class="k-card-title">{{ task.title }}</div>
+                <div class="k-card-meta">
+                  {% if task.assigned_agent_key %}<span>{{ task.assigned_agent_key }}</span>{% endif %}
+                </div>
+              </div>
+              {% else %}
+              <div class="empty-item">Empty</div>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+  </div>
 </div>
+
 <script>
-window.MARROWY_CONVERSATION_ID = "{{ conversation.id }}";
+window.MARROWY_CONVERSATION_ID = {{ conversation.id|tojson }};
+window.MARROWY_AGENT_PROFILES = {{ agent_profiles|tojson }};
 </script>
 {% endblock %}

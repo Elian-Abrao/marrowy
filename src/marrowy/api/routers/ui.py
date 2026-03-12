@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from fastapi import APIRouter
 from fastapi import Depends
 from fastapi import Request
@@ -10,6 +12,7 @@ from marrowy.api.deps import get_conversation_service
 from marrowy.api.deps import get_project_service
 from marrowy.api.deps import get_task_service
 from marrowy.core.settings import get_settings
+from marrowy.domain.agents import list_all_profiles
 from marrowy.services.conversations import ConversationService
 from marrowy.services.projects import ProjectService
 from marrowy.services.tasks import TaskService
@@ -46,16 +49,19 @@ def conversation_page(
     conversation = conversations.get_conversation(conversation_id)
     if conversation is None:
         return templates.TemplateResponse(request, "404.html", {"title": "Not found"}, status_code=404)
+    participants = conversations.list_participants(conversation_id)
     return templates.TemplateResponse(
         request,
         "conversation.html",
         {
             "title": conversation.title,
             "conversation": conversation,
+            "all_conversations": conversations.list_conversations(),
             "messages": conversations.list_messages(conversation_id),
-            "participants": conversations.list_participants(conversation_id),
+            "participants": participants,
+            "participant_agent_keys": [participant.agent_key for participant in participants if participant.agent_key],
             "tasks": tasks.list_for_conversation(conversation_id),
             "approvals": conversations.policies.pending_for_conversation(conversation_id),
-            "agent_profiles": list(getattr(__import__("marrowy.domain.agents", fromlist=["AGENT_PROFILES"]), "AGENT_PROFILES").values()),
+            "agent_profiles": [asdict(profile) for profile in list_all_profiles()],
         },
     )

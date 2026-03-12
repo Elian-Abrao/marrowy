@@ -28,3 +28,11 @@ class TaskRead(ORMModel):
 
 class TaskStatusUpdate(BaseModel):
     status: str
+
+
+class TaskCreate(BaseModel):
+    title: str
+    goal: str
+    assigned_agent_key: str | None = None
+    kind: str = "simple"
+

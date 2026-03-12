@@ -52,4 +52,6 @@ def worker_key_for_agent(agent_key: str) -> str:
         "github": "github",
         "devops": "devops",
         "po_pm": "planning",
+        "frontend": "specialist",
+        "backend_python": "specialist",
     }.get(agent_key, "summary")

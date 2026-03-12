@@ -3,16 +3,86 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
     <title>{{ title }}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="/static/app.css">
   </head>
-  <body>
-    <header class="shell-header">
-      <a href="/" class="brand">Marrowy</a>
-    </header>
-    <main class="page">
-      {% block content %}{% endblock %}
-    </main>
+  <body class="{{ body_class|default('app-shell') }}">
+    <div class="layout-wrapper">
+      <aside class="sidebar-left">
+        <div class="sidebar-header">
+          <a href="/" class="brand">
+            <div class="brand-icon">
+              <i data-lucide="layers"></i>
+            </div>
+            <span class="brand-text">Marrowy</span>
+          </a>
+          <p class="brand-subtitle">AI Cockpit</p>
+        </div>
+        
+        <nav class="sidebar-nav">
+          <div class="nav-section">
+            <h3 class="nav-title">Menu</h3>
+            <ul class="nav-list">
+              <li>
+                <a href="/" class="nav-link {% if request.url.path == '/' %}active{% endif %}">
+                  <i data-lucide="home"></i>
+                  <span>Home</span>
+                </a>
+              </li>
+            </ul>
+          </div>
+          
+          <div class="nav-section">
+            <h3 class="nav-title">Live Rooms</h3>
+            <ul class="nav-list" id="global-chats-list">
+              {% set sidebar_convs = all_conversations if all_conversations else conversations %}
+              {% if sidebar_convs %}
+                {% for conv in sidebar_convs %}
+                <li>
+                  <div class="nav-room-item">
+                    <a href="/conversations/{{ conv.id }}" class="nav-link {% if request.url.path == '/conversations/' ~ conv.id %}active{% endif %}" title="{{ conv.title }}">
+                      <i data-lucide="message-square"></i>
+                      <span class="truncate">{{ conv.title }}</span>
+                      {% if conv.status == 'active' %}
+                        <span class="status-dot active"></span>
+                      {% endif %}
+                    </a>
+                    <button
+                      type="button"
+                      class="nav-room-delete"
+                      data-delete-conversation-id="{{ conv.id }}"
+                      data-redirect-home="true"
+                      title="Delete room"
+                    >
+                      <i data-lucide="trash-2"></i>
+                    </button>
+                  </div>
+                </li>
+                {% endfor %}
+              {% else %}
+                <li class="nav-empty">No rooms yet.</li>
+              {% endif %}
+            </ul>
+          </div>
+        </nav>
+      </aside>
+
+      <main class="main-content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
     <script src="/static/app.js"></script>
+    <script>
+      // Initialize Lucide icons globally
+      if (typeof lucide !== 'undefined') {
+        lucide.createIcons();
+      }
+    </script>
   </body>
-  </html>
+</html>

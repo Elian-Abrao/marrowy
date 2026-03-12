@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from sqlalchemy import select
+
+from marrowy.db.models import ApprovalRequest
+from marrowy.db.models import Conversation
+from marrowy.db.models import ConversationMessage
+from marrowy.db.models import ConversationParticipant
+from marrowy.db.models import DomainEvent
+from marrowy.db.models import Job
+from marrowy.db.models import Task
+
 
 def test_project_and_conversation_api_flow(client, db_session):
     response = client.post(
@@ -79,4 +89,29 @@ def test_browser_ui_pages_render(client, db_session):
 
     conversation_page = client.get(f"/conversations/{conversation['id']}")
     assert conversation_page.status_code == 200
-    assert "Task Board" in conversation_page.text
+    assert "Task Pipeline" in conversation_page.text
+
+
+def test_delete_conversation_removes_related_state(client, db_session):
+    project = client.post("/api/projects", json={"slug": "delete-project", "name": "Delete Project"}).json()
+    conversation = client.post(
+        "/api/conversations",
+        json={"title": "Delete me", "project_id": project["id"], "channel": "browser"},
+    ).json()
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/messages",
+        json={"content": "Please create a mini dashboard MVP pipeline and add QA for validation.", "author_name": "Elian"},
+    )
+    assert response.status_code == 200
+
+    delete_response = client.delete(f"/api/conversations/{conversation['id']}")
+    assert delete_response.status_code == 200
+    assert delete_response.json()["status"] == "deleted"
+
+    assert db_session.get(Conversation, conversation["id"]) is None
+    assert db_session.scalar(select(ConversationMessage.id).where(ConversationMessage.conversation_id == conversation["id"])) is None
+    assert db_session.scalar(select(ConversationParticipant.id).where(ConversationParticipant.conversation_id == conversation["id"])) is None
+    assert db_session.scalar(select(Task.id).where(Task.conversation_id == conversation["id"])) is None
+    assert db_session.scalar(select(Job.id).where(Job.conversation_id == conversation["id"])) is None
+    assert db_session.scalar(select(ApprovalRequest.id).where(ApprovalRequest.conversation_id == conversation["id"])) is None
+    assert db_session.scalar(select(DomainEvent.id).where(DomainEvent.conversation_id == conversation["id"])) is None

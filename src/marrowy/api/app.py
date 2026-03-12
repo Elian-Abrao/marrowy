@@ -11,6 +11,7 @@ from marrowy.api.routers import conversations
 from marrowy.api.routers import health
 from marrowy.api.routers import projects
 from marrowy.api.routers import ui
+from marrowy.api.routers.conversations import agents_router
 from marrowy.core.logging import configure_logging
 from marrowy.core.settings import get_settings
 from marrowy.db.session import SessionLocal
@@ -43,6 +44,7 @@ def create_app(*, start_job_runner: bool = True) -> FastAPI:
     app.include_router(channels.router)
     app.include_router(projects.router)
     app.include_router(conversations.router)
+    app.include_router(agents_router)
     app.include_router(ui.router)
     static_dir = settings.base_dir / "src" / "marrowy" / "api" / "static"
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

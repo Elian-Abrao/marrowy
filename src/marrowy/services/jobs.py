@@ -230,6 +230,24 @@ class JobService:
         )
         return job
 
+    def cancel(self, job: Job) -> Job:
+        now = _now()
+        job.status = JobStatus.CANCELLED.value
+        job.finished_at = now
+        self.db.flush()
+        self.events.emit(
+            "job.cancelled",
+            conversation_id=job.conversation_id,
+            task_id=job.task_id,
+            payload={"jobId": job.id},
+        )
+        self._set_participant_activity(
+            participant_id=job.participant_id,
+            state=ParticipantActivityState.IDLE,
+            summary="Idle",
+        )
+        return job
+
     def has_pending_for_source(self, *, source_message_id: str, participant_id: str) -> bool:
         return self.db.scalar(
             select(Job.id).where(

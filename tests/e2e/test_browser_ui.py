@@ -52,18 +52,35 @@ def test_browser_ui_flow(tmp_path):
             page.goto("http://127.0.0.1:8011/")
             page.fill("#conversation-title", "Browser E2E Conversation")
             page.select_option("#conversation-project-id", label="Marrowy Demo")
-            page.click("text=Start Conversation")
+            page.click(".submit-room")
             page.wait_for_url("**/conversations/*")
+            conversation_url = page.url
             page.fill("#chat-input", "Create a todo MVP pipeline, add QA, and prepare deploy validation.")
-            page.click("text=Send")
+            page.click(".send-btn")
             page.wait_for_timeout(1500)
+            page.click("#btn-toggle-tasks")
+            page.wait_for_timeout(250)
             body = page.locator("body").inner_text()
             assert "Agent Principal" in body
-            assert "Task Board" in body
+            assert "Task Pipeline" in body
             assert "Agent QA" in body
-            assert "Active Jobs" in body
-            assert "queued" in body or "idle" in body or "working" in body
+            page.click("#btn-toggle-agents")
+            page.wait_for_timeout(250)
+            body = page.locator("body").inner_text()
+            assert "BACKGROUND ACTIVITY (TOOLCALLS)" in body
+            assert "Listening for jobs..." in body
+            page.once("dialog", lambda dialog: dialog.accept())
+            page.click("text=Delete Room")
+            page.wait_for_url("http://127.0.0.1:8011/")
+            home_body = page.locator("body").inner_text()
+            assert "Welcome back." in home_body
+            page.goto(conversation_url)
+            assert page.locator("body").inner_text().find("Not Found") != -1
             browser.close()
     finally:
         server.terminate()
-        server.wait(timeout=10)
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait(timeout=10)

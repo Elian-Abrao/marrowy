@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: marrowy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: marrowy
+      POSTGRES_PASSWORD: marrowy
+      POSTGRES_DB: marrowy
+    ports:
+      - "5432:5432"
+    volumes:
+      - marrowy-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  marrowy-postgres-data:

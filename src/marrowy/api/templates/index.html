@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid">
+  <article class="panel">
+    <h1>Projects</h1>
+    <ul class="project-list">
+      {% for project in projects %}
+      <li>
+        <strong>{{ project.name }}</strong><br>
+        <span class="muted">{{ project.slug }}</span>
+      </li>
+      {% else %}
+      <li class="muted">No projects yet.</li>
+      {% endfor %}
+    </ul>
+  </article>
+  <article class="panel">
+    <h1>Conversations</h1>
+    <form id="conversation-create-form" class="stack-form">
+      <label>
+        Title
+        <input id="conversation-title" name="title" placeholder="Example: Build MVP roadmap">
+      </label>
+      <label>
+        Project
+        <select id="conversation-project-id" name="project_id">
+          <option value="">None</option>
+          {% for project in projects %}
+          <option value="{{ project.id }}">{{ project.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit">Start Conversation</button>
+    </form>
+    <ul class="conversation-list">
+      {% for conversation in conversations %}
+      <li>
+        <a href="/conversations/{{ conversation.id }}">{{ conversation.title }}</a><br>
+        <span class="muted">{{ conversation.status }} · {{ conversation.channel }}</span>
+      </li>
+      {% else %}
+      <li class="muted">No conversations yet.</li>
+      {% endfor %}
+    </ul>
+  </article>
+</section>
+{% endblock %}

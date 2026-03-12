@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="conversation-layout" data-conversation-id="{{ conversation.id }}">
+  <section class="panel chat-panel">
+    <div class="chat-header">
+      <h1>{{ conversation.title }}</h1>
+      <span class="muted">{{ conversation.status }}</span>
+    </div>
+    <div id="chat-log" class="chat-log">
+      {% for message in messages %}
+      <article class="message message-{{ message.author_kind }}">
+        <header>{{ message.author_name }}</header>
+        <pre>{{ message.content }}</pre>
+      </article>
+      {% endfor %}
+    </div>
+    <form id="chat-form" class="chat-form">
+      <textarea id="chat-input" name="content" placeholder="Talk to Marrowy..." rows="4"></textarea>
+      <div class="actions">
+        <button type="submit">Send</button>
+      </div>
+    </form>
+  </section>
+  <aside class="sidebar">
+    <article class="panel">
+      <h2>Participants</h2>
+      <ul id="participants-list">
+        {% for participant in participants %}
+        <li>{{ participant.display_name }}</li>
+        {% endfor %}
+      </ul>
+    </article>
+    <article class="panel">
+      <h2>Pending Approvals</h2>
+      <ul id="approvals-list">
+        {% for approval in approvals %}
+        <li>
+          <strong>{{ approval.summary }}</strong><br>
+          <button data-approval-id="{{ approval.id }}" data-decision="approve">Approve</button>
+          <button data-approval-id="{{ approval.id }}" data-decision="reject">Reject</button>
+        </li>
+        {% else %}
+        <li class="muted">No approvals pending.</li>
+        {% endfor %}
+      </ul>
+    </article>
+    <article class="panel">
+      <h2>Task Board</h2>
+      <div id="task-board" class="task-board">
+        {% for status in ["created","planned","in_progress","blocked","waiting_approval","testing","deploying","done","failed","cancelled"] %}
+        <section class="task-column">
+          <h3>{{ status }}</h3>
+          {% for task in tasks if task.status == status %}
+          <article class="task-card">
+            <strong>{{ task.title }}</strong><br>
+            <span class="muted">{{ task.id }}</span>
+          </article>
+          {% endfor %}
+        </section>
+        {% endfor %}
+      </div>
+    </article>
+  </aside>
+</div>
+<script>
+window.MARROWY_CONVERSATION_ID = "{{ conversation.id }}";
+</script>
+{% endblock %}

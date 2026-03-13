@@ -66,6 +66,17 @@ def test_browser_ui_flow(tmp_path):
             assert "Agent Principal" in body
             assert "Task Pipeline" in body
             assert "Agent QA" in body
+            page.locator(".kanban-card").first.click()
+            page.wait_for_timeout(250)
+            assert page.locator("#task-detail-modal:not(.hidden)").count() == 1
+            page.fill("#task-detail-repository", "marrowy")
+            page.fill("#task-detail-branch", "feature/browser-ui")
+            page.fill("#task-detail-gmud", "GMUD-9000")
+            page.click("#task-detail-form button[type='submit']")
+            page.wait_for_timeout(500)
+            assert page.locator("#task-detail-repository").input_value() == "marrowy"
+            page.click(".task-detail-dialog .close-panel")
+            page.wait_for_timeout(250)
             page.click("#btn-toggle-agents")
             page.wait_for_timeout(250)
             assert page.locator("#new-agent-effort").count() == 1

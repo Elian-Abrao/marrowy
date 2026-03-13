@@ -213,6 +213,66 @@
         </div>
       </div>
     </aside>
+
+    <div id="task-detail-modal" class="overlay-modal hidden" aria-hidden="true">
+      <div class="overlay-backdrop" data-close-task-modal="true"></div>
+      <div class="overlay-dialog glass-panel task-detail-dialog">
+        <div class="panel-header">
+          <div>
+            <h3 id="task-detail-title">Task Details</h3>
+            <p id="task-detail-subtitle" class="panel-subtitle">Inspect and update operational task fields.</p>
+          </div>
+          <button class="close-panel" type="button" data-close-task-modal="true"><i data-lucide="x"></i></button>
+        </div>
+        <div class="task-detail-layout">
+          <section class="task-detail-section">
+            <h4 class="group-title">Overview</h4>
+            <div id="task-detail-overview" class="task-overview-grid"></div>
+            <div class="detail-block">
+              <label>Goal</label>
+              <pre id="task-detail-goal" class="detail-markdown"></pre>
+            </div>
+            <div class="detail-block">
+              <label>Subtasks</label>
+              <div id="task-detail-subtasks" class="detail-subtasks empty-item">No subtasks.</div>
+            </div>
+          </section>
+
+          <section class="task-detail-section">
+            <h4 class="group-title">Edit Operational Fields</h4>
+            <form id="task-detail-form" class="compact-form task-detail-form">
+              <input type="hidden" id="task-detail-id" />
+              <textarea id="task-detail-scope" rows="2" placeholder="Scope"></textarea>
+              <textarea id="task-detail-acceptance" rows="3" placeholder="Acceptance criteria"></textarea>
+              <div class="task-form-grid">
+                <input type="text" id="task-detail-repository" placeholder="Repository" />
+                <input type="text" id="task-detail-branch" placeholder="Branch" />
+                <input type="text" id="task-detail-environment" placeholder="Environment" />
+                <select id="task-detail-agent">
+                  <option value="">Assign to...</option>
+                  {% for profile in agent_profiles %}
+                  <option value="{{ profile.key }}">{{ profile.display_name }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <label class="checkbox-row">
+                <input type="checkbox" id="task-detail-approval-required" />
+                <span>Approval required</span>
+              </label>
+              <textarea id="task-detail-updates" rows="3" placeholder="Updates"></textarea>
+              <textarea id="task-detail-blockers" rows="3" placeholder="Blockers"></textarea>
+              <textarea id="task-detail-result" rows="3" placeholder="Result"></textarea>
+              <textarea id="task-detail-observations" rows="3" placeholder="Observations"></textarea>
+              <textarea id="task-detail-evidence" rows="3" placeholder="Evidence"></textarea>
+              <input type="text" id="task-detail-gmud" placeholder="GMUD reference" />
+              <div class="task-detail-actions">
+                <button type="submit" class="btn-primary btn-sm-full"><i data-lucide="save"></i> Save Task</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 

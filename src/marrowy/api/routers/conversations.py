@@ -15,6 +15,7 @@ from marrowy.api.deps import get_task_service
 from marrowy.api.deps import get_db
 from marrowy.db.models import DomainEvent
 from marrowy.domain.agents import list_all_profiles
+from marrowy.domain.agents import get_agent_profile
 from marrowy.domain.agents import register_agent
 from marrowy.domain.agents import update_agent
 from marrowy.schemas.approvals import ApprovalRead
@@ -28,6 +29,7 @@ from marrowy.schemas.conversations import MessageRead
 from marrowy.schemas.conversations import ParticipantRead
 from marrowy.schemas.tasks import TaskCreate
 from marrowy.schemas.tasks import TaskRead
+from marrowy.schemas.tasks import TaskUpdateManual
 from marrowy.services.conversations import ConversationService
 from marrowy.services.domain_actions import SubtaskContract
 from marrowy.services.domain_actions import TaskContract
@@ -299,5 +301,47 @@ def create_task_manually(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.result_markdown:
         task.result_markdown = payload.result_markdown
+    service.db.commit()
+    return TaskRead.model_validate(task)
+
+
+@router.patch("/{conversation_id}/tasks/{task_id}", response_model=TaskRead)
+def update_task_manually(
+    conversation_id: str,
+    task_id: str,
+    payload: TaskUpdateManual,
+    service: ConversationService = Depends(get_conversation_service),
+) -> TaskRead:
+    conversation = service.get_conversation(conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    task = service.tasks.get(task_id)
+    if task is None or task.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="task not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if "assigned_agent_key" in updates and updates["assigned_agent_key"] == "":
+        updates["assigned_agent_key"] = None
+    safe_fields = {
+        "scope",
+        "acceptance_criteria_markdown",
+        "repository_name",
+        "branch_name",
+        "environment_name",
+        "assigned_agent_key",
+        "updates_markdown",
+        "blockers_markdown",
+        "approval_required",
+        "result_markdown",
+        "observations_markdown",
+        "evidence_markdown",
+        "gmud_reference",
+    }
+    filtered = {key: value for key, value in updates.items() if key in safe_fields}
+    if "assigned_agent_key" in filtered and filtered["assigned_agent_key"] is not None:
+        try:
+            get_agent_profile(str(filtered["assigned_agent_key"]))
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    service.tasks.update_fields(task, updates=filtered)
     service.db.commit()
     return TaskRead.model_validate(task)

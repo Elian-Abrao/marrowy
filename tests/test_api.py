@@ -150,6 +150,36 @@ def test_manual_task_creation_accepts_rich_contract(client, db_session):
     assert task["gmud_reference"] == "GMUD-4242"
 
 
+def test_manual_task_update_updates_operational_fields(client, db_session):
+    project = client.post("/api/projects", json={"slug": "task-update-project", "name": "Task Update Project"}).json()
+    conversation = client.post(
+        "/api/conversations",
+        json={"title": "Task update room", "project_id": project["id"], "channel": "browser"},
+    ).json()
+    created = client.post(
+        f"/api/conversations/{conversation['id']}/tasks",
+        json={"title": "Review deployment", "goal": "Review deployment readiness", "assigned_agent_key": "devops"},
+    ).json()
+
+    response = client.patch(
+        f"/api/conversations/{conversation['id']}/tasks/{created['id']}",
+        json={
+            "repository_name": "marrowy",
+            "branch_name": "release/review",
+            "environment_name": "production",
+            "gmud_reference": "GMUD-8888",
+            "approval_required": True,
+        },
+    )
+    assert response.status_code == 200
+    task = response.json()
+    assert task["repository_name"] == "marrowy"
+    assert task["branch_name"] == "release/review"
+    assert task["environment_name"] == "production"
+    assert task["approval_required"] is True
+    assert task["gmud_reference"] == "GMUD-8888"
+
+
 def test_delete_conversation_removes_related_state(client, db_session):
     project = client.post("/api/projects", json={"slug": "delete-project", "name": "Delete Project"}).json()
     conversation = client.post(

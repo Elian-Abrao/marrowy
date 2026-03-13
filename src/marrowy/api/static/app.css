@@ -36,6 +36,10 @@
 * { box-sizing: border-box; }
 html { height: 100%; }
 
+.hidden {
+  display: none !important;
+}
+
 body {
   margin: 0;
   height: 100vh;
@@ -1057,11 +1061,161 @@ body {
 .kanban-card {
   background: rgba(255,255,255,0.05); padding: 12px;
   border-radius: var(--radius-sm); border: 1px solid var(--border-glass);
+  width: 100%;
+  text-align: left;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.kanban-card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(16, 185, 129, 0.3);
+  background: rgba(255,255,255,0.08);
 }
 .k-card-title { font-size: 0.9rem; font-weight: 500; margin-bottom: 8px; text-transform: none; }
+.k-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
 .k-card-meta span {
   font-size: 0.7rem; background: rgba(16, 185, 129, 0.15); color: #a7f3d0;
   padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.overlay-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(5, 8, 14, 0.65);
+  backdrop-filter: blur(8px);
+}
+
+.overlay-dialog {
+  position: relative;
+  width: min(1080px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+}
+
+.task-detail-dialog {
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-subtitle {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.task-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+  gap: 0;
+  min-height: 0;
+}
+
+.task-detail-section {
+  padding: 16px 24px 24px;
+  overflow-y: auto;
+  max-height: calc(100vh - 144px);
+}
+
+.task-detail-section + .task-detail-section {
+  border-left: 1px solid var(--border-glass);
+}
+
+.task-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.task-overview-grid div {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+}
+
+.task-overview-grid label,
+.detail-block label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.detail-block {
+  margin-bottom: 16px;
+}
+
+.detail-markdown {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+
+.detail-subtask-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detail-subtask-list li {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-subtask-list small {
+  color: var(--text-muted);
+}
+
+.task-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.task-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 /* Scrollbars */

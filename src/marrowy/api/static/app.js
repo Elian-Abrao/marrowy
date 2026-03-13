@@ -4,6 +4,8 @@ const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"];
 
 let refreshInFlight = false;
 let refreshQueued = false;
+let currentTasks = [];
+let selectedTaskId = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -148,6 +150,36 @@ function renderApproval(approval) {
   `;
 }
 
+function getTaskById(taskId) {
+  return currentTasks.find((task) => task.id === taskId) || null;
+}
+
+function renderTaskCardMeta(task) {
+  const chips = [];
+  if (task.assigned_agent_key) chips.push(`<span>${escapeHtml(task.assigned_agent_key)}</span>`);
+  if (task.repository_name) chips.push(`<span>${escapeHtml(task.repository_name)}</span>`);
+  if (task.environment_name) chips.push(`<span>${escapeHtml(task.environment_name)}</span>`);
+  return chips.join("");
+}
+
+function renderTaskSubtasks(taskId) {
+  const subtasks = currentTasks.filter((task) => task.parent_task_id === taskId);
+  if (!subtasks.length) {
+    return `<div class="empty-item">No subtasks.</div>`;
+  }
+  return `
+    <ul class="detail-subtask-list">
+      ${subtasks.map((task) => `
+        <li>
+          <strong>${escapeHtml(task.title)}</strong>
+          <span>${humanize(task.status)}</span>
+          ${task.assigned_agent_key ? `<small>${escapeHtml(task.assigned_agent_key)}</small>` : ""}
+        </li>
+      `).join("")}
+    </ul>
+  `;
+}
+
 function renderTaskColumn(status, tasks) {
   return `
     <div class="kanban-col" data-status="${escapeHtml(status)}">
@@ -157,12 +189,12 @@ function renderTaskColumn(status, tasks) {
       </div>
       <div class="kanban-cards">
         ${tasks.length ? tasks.map((task) => `
-          <div class="kanban-card">
+          <button type="button" class="kanban-card" data-task-id="${escapeHtml(task.id)}">
             <div class="k-card-title">${escapeHtml(task.title)}</div>
             <div class="k-card-meta">
-              ${task.assigned_agent_key ? `<span>${escapeHtml(task.assigned_agent_key)}</span>` : ""}
+              ${renderTaskCardMeta(task)}
             </div>
-          </div>
+          </button>
         `).join("") : `<div class="empty-item">Empty</div>`}
       </div>
     </div>
@@ -188,6 +220,71 @@ function renderJob(job) {
       ${errorMsg}
     </li>
   `;
+}
+
+function openTaskModal(taskId) {
+  const task = getTaskById(taskId);
+  const modal = document.getElementById("task-detail-modal");
+  if (!task || !modal) return;
+  selectedTaskId = taskId;
+  populateTaskModal(task);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closeTaskModal() {
+  const modal = document.getElementById("task-detail-modal");
+  if (!modal) return;
+  selectedTaskId = null;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function populateTaskModal(task) {
+  const setValue = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.value = value ?? "";
+  };
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value ?? "";
+  };
+  const setHtml = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.innerHTML = value;
+  };
+
+  setText("task-detail-title", task.title || "Task Details");
+  setText("task-detail-subtitle", `${humanize(task.kind)} · ${humanize(task.status)}`);
+  setValue("task-detail-id", task.id);
+  setText("task-detail-goal", task.goal || "");
+  setHtml(
+    "task-detail-overview",
+    `
+      <div><label>ID</label><code>${escapeHtml(task.id)}</code></div>
+      <div><label>Status</label><span>${humanize(task.status)}</span></div>
+      <div><label>Kind</label><span>${humanize(task.kind)}</span></div>
+      <div><label>Assigned</label><span>${escapeHtml(task.assigned_agent_key || "unassigned")}</span></div>
+      <div><label>Created</label><span>${escapeHtml(task.created_at || "")}</span></div>
+      <div><label>Updated</label><span>${escapeHtml(task.updated_at || "")}</span></div>
+    `,
+  );
+  setHtml("task-detail-subtasks", renderTaskSubtasks(task.id));
+
+  setValue("task-detail-scope", task.scope || "");
+  setValue("task-detail-acceptance", task.acceptance_criteria_markdown || "");
+  setValue("task-detail-repository", task.repository_name || "");
+  setValue("task-detail-branch", task.branch_name || "");
+  setValue("task-detail-environment", task.environment_name || "");
+  setValue("task-detail-agent", task.assigned_agent_key || "");
+  const approvalCheckbox = document.getElementById("task-detail-approval-required");
+  if (approvalCheckbox) approvalCheckbox.checked = Boolean(task.approval_required);
+  setValue("task-detail-updates", task.updates_markdown || "");
+  setValue("task-detail-blockers", task.blockers_markdown || "");
+  setValue("task-detail-result", task.result_markdown || "");
+  setValue("task-detail-observations", task.observations_markdown || "");
+  setValue("task-detail-evidence", task.evidence_markdown || "");
+  setValue("task-detail-gmud", task.gmud_reference || "");
 }
 
 function renderAgentRoster(profiles, participants) {
@@ -236,6 +333,7 @@ async function refreshConversation(conversationId) {
     fetchJson(`/api/conversations/${conversationId}/approvals`),
     fetchJson(`/api/conversations/${conversationId}/jobs`),
   ]);
+  currentTasks = tasks;
 
   const log = document.getElementById("chat-log");
   if (log) {
@@ -279,6 +377,14 @@ async function refreshConversation(conversationId) {
   }
 
   updateMetricCards(participants, approvals, tasks);
+  if (selectedTaskId) {
+    const selectedTask = getTaskById(selectedTaskId);
+    if (selectedTask) {
+      populateTaskModal(selectedTask);
+    } else {
+      closeTaskModal();
+    }
+  }
   
   if (typeof lucide !== 'undefined') {
     lucide.createIcons();
@@ -410,6 +516,19 @@ document.addEventListener("click", async (event) => {
       agentButton.disabled = false;
       console.error(e);
     }
+    return;
+  }
+
+  const taskCard = event.target.closest(".kanban-card[data-task-id]");
+  if (taskCard) {
+    const taskId = taskCard.dataset.taskId;
+    if (taskId) openTaskModal(taskId);
+    return;
+  }
+
+  const closeTaskModalButton = event.target.closest("[data-close-task-modal]");
+  if (closeTaskModalButton) {
+    closeTaskModal();
     return;
   }
 
@@ -584,6 +703,39 @@ document.addEventListener("DOMContentLoaded", () => {
         taskForm.reset();
         await enqueueRefresh(conversationId);
       } catch (err) { console.error(err); }
+    });
+  }
+
+  const taskDetailForm = document.getElementById("task-detail-form");
+  if (taskDetailForm) {
+    taskDetailForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const taskId = document.getElementById("task-detail-id")?.value;
+      if (!taskId) return;
+      try {
+        await fetchJson(`/api/conversations/${conversationId}/tasks/${taskId}`, {
+          method: "PATCH",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            scope: document.getElementById("task-detail-scope")?.value || null,
+            acceptance_criteria_markdown: document.getElementById("task-detail-acceptance")?.value || null,
+            repository_name: document.getElementById("task-detail-repository")?.value || null,
+            branch_name: document.getElementById("task-detail-branch")?.value || null,
+            environment_name: document.getElementById("task-detail-environment")?.value || null,
+            assigned_agent_key: document.getElementById("task-detail-agent")?.value || null,
+            updates_markdown: document.getElementById("task-detail-updates")?.value || null,
+            blockers_markdown: document.getElementById("task-detail-blockers")?.value || null,
+            approval_required: Boolean(document.getElementById("task-detail-approval-required")?.checked),
+            result_markdown: document.getElementById("task-detail-result")?.value || null,
+            observations_markdown: document.getElementById("task-detail-observations")?.value || null,
+            evidence_markdown: document.getElementById("task-detail-evidence")?.value || null,
+            gmud_reference: document.getElementById("task-detail-gmud")?.value || null,
+          }),
+        });
+        await enqueueRefresh(conversationId);
+      } catch (err) {
+        console.error(err);
+      }
     });
   }
 });

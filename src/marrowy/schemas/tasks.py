@@ -59,3 +59,19 @@ class TaskCreate(BaseModel):
     observations_markdown: str | None = None
     evidence_markdown: str | None = None
     gmud_reference: str | None = None
+
+
+class TaskUpdateManual(BaseModel):
+    scope: str | None = None
+    acceptance_criteria_markdown: str | None = None
+    repository_name: str | None = None
+    branch_name: str | None = None
+    environment_name: str | None = None
+    assigned_agent_key: str | None = None
+    updates_markdown: str | None = None
+    blockers_markdown: str | None = None
+    approval_required: bool | None = None
+    result_markdown: str | None = None
+    observations_markdown: str | None = None
+    evidence_markdown: str | None = None
+    gmud_reference: str | None = None

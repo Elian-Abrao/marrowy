@@ -109,3 +109,71 @@ async def test_codex_bridge_provider_retries_without_stale_thread(monkeypatch):
     assert thread_id == "fresh-thread"
     assert result.text == "Recovered reply"
     assert any("fresh thread" in text.lower() for kind, text in seen_events if kind == "status")
+
+
+@pytest.mark.asyncio
+async def test_codex_bridge_provider_forwards_assistant_delta_and_effort(monkeypatch):
+    payloads: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        async def aiter_lines(self):
+            for line in [
+                "event: assistant_delta",
+                "data: {\"event\":\"assistant_delta\",\"text\":\"Hello \"}",
+                "",
+                "event: assistant_delta",
+                "data: {\"event\":\"assistant_delta\",\"text\":\"world\"}",
+                "",
+                "event: final",
+                "data: {\"event\":\"final\",\"text\":\"Hello world\",\"threadId\":\"thread-1\"}",
+                "",
+            ]:
+                yield line
+
+    class FakeStreamContext:
+        async def __aenter__(self):
+            return FakeResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, json):
+            payloads.append(json)
+            return FakeStreamContext()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    provider = CodexBridgeProvider(base_url="http://127.0.0.1:8787", timeout=0.1)
+    seen_events: list[tuple[str, str]] = []
+
+    async def on_event(kind: str, text: str):
+        seen_events.append((kind, text))
+
+    result, thread_id = await provider.complete(
+        role_name="Agent Principal",
+        instructions="Keep the chat short.",
+        prompt="hello",
+        effort="medium",
+        event_handler=on_event,
+    )
+
+    assert payloads[0]["effort"] == "medium"
+    assert payloads[0]["summary"] == "concise"
+    assert [event for event in seen_events if event[0] == "assistant_delta"] == [
+        ("assistant_delta", "Hello "),
+        ("assistant_delta", "world"),
+    ]
+    assert result.text == "Hello world"
+    assert thread_id == "thread-1"

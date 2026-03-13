@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,6 +33,12 @@ from marrowy.domain.enums import TaskStatus
 from marrowy.domain.workers import worker_key_for_agent
 from marrowy.providers.base import ModelProvider
 from marrowy.services.events import EventService
+from marrowy.services.domain_actions import AddAgentContract
+from marrowy.services.domain_actions import AgentProfileContract
+from marrowy.services.domain_actions import DomainActionService
+from marrowy.services.domain_actions import SubtaskContract
+from marrowy.services.domain_actions import TaskContract
+from marrowy.services.domain_actions import TaskUpdateContract
 from marrowy.services.jobs import JobService
 from marrowy.services.memory import MemoryService
 from marrowy.services.policies import PolicyService
@@ -71,12 +78,20 @@ class OrchestrationPlan:
     scheduled_turns: list[ScheduledTurn] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class RequestedAgentAction:
+    agent_key: str | None = None
+    display_name: str | None = None
+    should_create_profile: bool = False
+
+
 class ConversationService:
     def __init__(self, db: Session, provider: ModelProvider) -> None:
         self.db = db
         self.provider = provider
         self.events = EventService(db)
         self.tasks = TaskService(db)
+        self.domain_actions = DomainActionService(db)
         self.policies = PolicyService(db)
         self.memory = MemoryService(db)
         self.jobs = JobService(db)
@@ -187,28 +202,13 @@ class ConversationService:
         return message
 
     def add_agent(self, conversation_id: str, agent_key: str) -> ConversationParticipant:
-        existing = self.db.scalar(
-            select(ConversationParticipant).where(
-                ConversationParticipant.conversation_id == conversation_id,
-                ConversationParticipant.agent_key == agent_key,
-            )
-        )
-        if existing is not None:
-            return existing
-        profile = get_agent_profile(agent_key)
-        participant = ConversationParticipant(
+        result = self.domain_actions.add_agent_to_room(
             conversation_id=conversation_id,
-            kind=ParticipantKind.AGENT.value,
-            agent_key=agent_key,
-            display_name=profile.display_name,
-            activity_state=ParticipantActivityState.IDLE.value,
-            activity_summary="Available for assignment.",
-            last_activity_at=_utcnow(),
+            contract=AddAgentContract(agent_key=agent_key),
         )
-        self.db.add(participant)
-        self.db.flush()
-        self.events.emit("agent.joined", conversation_id=conversation_id, payload={"agentKey": agent_key})
-        return participant
+        if result.added:
+            result.participant.last_activity_at = _utcnow()
+        return result.participant
 
     def resolve_approval(self, approval_id: str, *, actor_name: str, decision: str) -> ApprovalRequest:
         approval = self.db.get(ApprovalRequest, approval_id)
@@ -253,7 +253,6 @@ class ConversationService:
             participant_id=user.id,
         )
         created_messages: list[ConversationMessage] = [user_message]
-        created_messages.append(self._acknowledge_user_message(context, user_message))
 
         local_status_reply = self._maybe_build_local_status_reply(context, content)
         if local_status_reply is not None:
@@ -273,7 +272,7 @@ class ConversationService:
             scheduled_ids.add(turn.participant.id)
             if turn.task_id and turn.participant.agent_key:
                 self._mark_task_visible_progress(turn.task_id, turn.participant.agent_key)
-            self.jobs.enqueue(
+            job, _ = self.jobs.enqueue(
                 conversation_id=context.conversation.id,
                 worker_key=turn.worker_key,
                 agent_key=turn.participant.agent_key,
@@ -285,6 +284,15 @@ class ConversationService:
                 payload={"prompt": content},
                 priority=self._priority_for_agent(turn.participant.agent_key),
             )
+            stream_message = self._ensure_stream_message(
+                conversation_id=context.conversation.id,
+                participant=turn.participant,
+                job=job,
+            )
+            payload_json = dict(job.payload_json or {})
+            payload_json["streamMessageId"] = stream_message.id
+            job.payload_json = payload_json
+            created_messages.append(stream_message)
 
         self._refresh_conversation_state(conversation_id)
         context.conversation.updated_at = _utcnow()
@@ -312,7 +320,13 @@ class ConversationService:
             messages=self.list_messages(conversation.id),
             current_task=self.tasks.get(job.task_id) if job.task_id else None,
         )
+        stream_message = self._ensure_stream_message(
+            conversation_id=conversation.id,
+            participant=participant,
+            job=job,
+        )
         self.jobs.mark_running(job, summary=job.summary)
+        self._set_stream_state(stream_message, "thinking")
         self._maybe_transition_task_on_job_start(job)
         self._refresh_conversation_state(conversation.id)
         self.db.commit()
@@ -323,16 +337,12 @@ class ConversationService:
             progress_text = text.strip()
             if not progress_text:
                 return
-            self.jobs.append_progress(job, text=progress_text, progress_type=event_type)
-            self.add_message(
-                conversation_id=conversation.id,
-                author_name=profile.display_name,
-                author_kind=ParticipantKind.AGENT.value,
-                content=progress_text,
-                message_type=MessageKind.SYSTEM.value,
-                participant_id=participant.id,
-                metadata={"jobId": job.id, "progressType": event_type},
-            )
+            if event_type == "assistant_delta":
+                self._append_stream_content(stream_message, progress_text)
+            else:
+                if event_type not in {"status"} or progress_text not in {"Thread started.", "Turn started."}:
+                    self.jobs.append_progress(job, text=progress_text, progress_type=event_type)
+                    self._append_stream_thinking(stream_message, event_type, progress_text)
             self.db.commit()
 
         try:
@@ -342,11 +352,13 @@ class ConversationService:
                 prompt=prompt,
                 thread_id=participant.bridge_thread_id,
                 cwd=self._select_cwd(self.db.get(Project, conversation.project_id) if conversation.project_id else None),
+                effort=profile.effort,
                 event_handler=on_provider_event,
             )
         except Exception as exc:
             error_text = self._describe_provider_failure(exc)
             self.jobs.fail(job, error=error_text)
+            self._set_stream_state(stream_message, "error")
             self.add_message(
                 conversation_id=conversation.id,
                 author_name=profile.display_name,
@@ -370,18 +382,50 @@ class ConversationService:
         if thread_id and participant.bridge_thread_id != thread_id:
             participant.bridge_thread_id = thread_id
         content = result.text.strip()
-        self.add_message(
-            conversation_id=conversation.id,
-            author_name=profile.display_name,
-            author_kind=ParticipantKind.AGENT.value,
+        content, applied_updates, task_update_errors = self._apply_task_update_directives(
+            participant=participant,
+            conversation=conversation,
             content=content,
-            message_type=MessageKind.AGENT.value,
-            participant_id=participant.id,
-            metadata={"commentary": result.commentary, "actions": result.actions},
+            job=job,
         )
+        self._finalize_stream_message(
+            stream_message,
+            content=content,
+            metadata_updates={
+                "commentary": result.commentary,
+                "actions": result.actions,
+                "taskUpdates": applied_updates,
+                "taskUpdateErrors": task_update_errors,
+            },
+        )
+        if applied_updates:
+            summary = ", ".join(f"{item['taskId']} ({', '.join(item['updatedFields'])})" for item in applied_updates)
+            self.add_message(
+                conversation_id=conversation.id,
+                author_name="Marrowy",
+                author_kind=ParticipantKind.AGENT.value,
+                content=f"Applied task updates: {summary}",
+                message_type=MessageKind.SYSTEM.value,
+                metadata={"jobId": job.id, "domainAction": "update_task", "updates": applied_updates},
+            )
+        for error_text in task_update_errors:
+            self.add_message(
+                conversation_id=conversation.id,
+                author_name="Marrowy",
+                author_kind=ParticipantKind.AGENT.value,
+                content=f"Task update could not be applied: {error_text}",
+                message_type=MessageKind.SYSTEM.value,
+                metadata={"jobId": job.id, "domainAction": "update_task_error"},
+            )
         self.jobs.succeed(
             job,
-            result={"threadId": thread_id, "commentary": result.commentary, "actions": result.actions},
+            result={
+                "threadId": thread_id,
+                "commentary": result.commentary,
+                "actions": result.actions,
+                "taskUpdates": applied_updates,
+                "taskUpdateErrors": task_update_errors,
+            },
             summary=f"{profile.display_name} completed the assigned turn.",
         )
         self._maybe_transition_task_on_job_success(job)
@@ -406,18 +450,6 @@ class ConversationService:
             pending_approvals=pending,
             tasks=tasks,
             jobs=jobs,
-        )
-
-    def _acknowledge_user_message(self, context: MessageContext, user_message: ConversationMessage) -> ConversationMessage:
-        summary = "I received your message. I am coordinating the next steps and will keep the room updated while the workers run."
-        return self.add_message(
-            conversation_id=context.conversation.id,
-            author_name=context.principal.display_name,
-            author_kind=ParticipantKind.AGENT.value,
-            content=summary,
-            message_type=MessageKind.SYSTEM.value,
-            participant_id=context.principal.id,
-            metadata={"ackForMessageId": user_message.id},
         )
 
     @staticmethod
@@ -482,7 +514,45 @@ class ConversationService:
         text = _normalize_text(content)
         plan = OrchestrationPlan()
 
-        for agent_key in self._requested_agent_additions(text):
+        for requested in self._requested_agent_actions(text, content):
+            profile_message: ConversationMessage | None = None
+            agent_key = requested.agent_key
+            if requested.should_create_profile:
+                contract = self._agent_profile_contract_from_label(requested.display_name or requested.agent_key or "Custom Agent")
+                if agent_key:
+                    contract = contract.model_copy(update={"key": agent_key})
+                profile_result = self.domain_actions.create_agent_profile(contract)
+                agent_key = profile_result.profile.key
+                if profile_result.created:
+                    profile_message = self.add_message(
+                        conversation_id=context.conversation.id,
+                        author_name=context.principal.display_name,
+                        author_kind=ParticipantKind.AGENT.value,
+                        content=(
+                            f"Created new agent profile `{profile_result.profile.key}` "
+                            f"({profile_result.profile.display_name}) and made it available to the room."
+                        ),
+                        message_type=MessageKind.SYSTEM.value,
+                        participant_id=context.principal.id,
+                        metadata={"agentKey": profile_result.profile.key, "domainAction": "create_agent_profile"},
+                    )
+                else:
+                    profile_message = self.add_message(
+                        conversation_id=context.conversation.id,
+                        author_name=context.principal.display_name,
+                        author_kind=ParticipantKind.AGENT.value,
+                        content=(
+                            f"Reusing existing agent profile `{profile_result.profile.key}` "
+                            f"({profile_result.profile.display_name}) instead of creating a duplicate."
+                        ),
+                        message_type=MessageKind.SYSTEM.value,
+                        participant_id=context.principal.id,
+                        metadata={"agentKey": profile_result.profile.key, "domainAction": "reuse_agent_profile"},
+                    )
+            if agent_key is None:
+                continue
+            if profile_message is not None:
+                plan.messages.append(profile_message)
             participant, was_added = self._ensure_agent_with_handoff(
                 context=context,
                 agent_key=agent_key,
@@ -545,6 +615,18 @@ class ConversationService:
                         author_kind=ParticipantKind.AGENT.value,
                         content=f"Created task {task.id} and mapped it to Agent Specialist.",
                         message_type=MessageKind.AGENT.value,
+                        participant_id=context.principal.id,
+                        metadata={"taskId": task.id},
+                    )
+                )
+            else:
+                plan.messages.append(
+                    self.add_message(
+                        conversation_id=context.conversation.id,
+                        author_name=context.principal.display_name,
+                        author_kind=ParticipantKind.AGENT.value,
+                        content=f"Reusing existing task {task.id} instead of creating a duplicate.",
+                        message_type=MessageKind.SYSTEM.value,
                         participant_id=context.principal.id,
                         metadata={"taskId": task.id},
                     )
@@ -753,7 +835,11 @@ class ConversationService:
         existing = next((item for item in self.list_participants(context.conversation.id) if item.agent_key == agent_key), None)
         if existing is not None:
             return existing, False
-        participant = self.add_agent(context.conversation.id, agent_key)
+        participant = self.domain_actions.add_agent_to_room(
+            conversation_id=context.conversation.id,
+            contract=AddAgentContract(agent_key=agent_key, reason=source_content),
+        ).participant
+        participant.last_activity_at = _utcnow()
         self.events.emit(
             "agent.onboarded",
             conversation_id=context.conversation.id,
@@ -800,31 +886,75 @@ class ConversationService:
 
     def _participants_to_invoke(self, context: MessageContext, text: str) -> list[ConversationParticipant]:
         ordered_keys = ["principal"]
-        role_tokens = {
-            "specialist": ["@specialist", "agent specialist", "ask specialist", "have specialist", "bring in specialist", "add specialist"],
-            "qa": ["@qa", "agent qa", "ask qa", "have qa", "bring in qa", "add qa"],
-            "github": ["@github", "agent github", "ask github", "have github", "bring in github", "add github"],
-            "devops": ["@devops", "agent devops", "ask devops", "have devops", "bring in devops", "add devops"],
-            "po_pm": ["@po", "@pm", "agent po/pm", "agent pm", "agent po", "ask pm", "ask po", "have pm", "bring in pm", "add pm", "add po/pm"],
-        }
+        role_tokens = self._agent_aliases()
         for key, tokens in role_tokens.items():
-            if any(token in text for token in tokens):
+            if any(token in text for token in tokens + [f"@{key}"]):
                 ordered_keys.append(key)
         participants_by_key = {participant.agent_key: participant for participant in self.list_participants(context.conversation.id) if participant.agent_key}
         return [participants_by_key[key] for key in ordered_keys if key in participants_by_key]
 
-    def _requested_agent_additions(self, text: str) -> list[str]:
-        additions: list[str] = []
-        tokens = {
-            "specialist": ["add specialist", "add agent specialist", "bring in specialist"],
-            "qa": ["add qa", "add agent qa", "bring in qa"],
-            "github": ["add github", "add agent github", "bring in github"],
-            "devops": ["add devops", "add agent devops", "bring in devops"],
-            "po_pm": ["add po", "add pm", "add po/pm", "bring in po", "bring in pm", "agent po/pm", "agent pm", "agent po"],
-        }
-        for key, phrases in tokens.items():
-            if any(phrase in text for phrase in phrases):
-                additions.append(key)
+    def _requested_agent_actions(self, text: str, source_content: str) -> list[RequestedAgentAction]:
+        additions: list[RequestedAgentAction] = []
+        action_intents = [
+            "add",
+            "bring in",
+            "hire",
+            "create agent",
+            "create a new agent",
+            "talk with",
+            "talk to",
+            "ask",
+            "have",
+            "contrate",
+            "adicione",
+            "adiciona",
+            "crie um agent",
+            "crie um agente",
+            "crie um novo agent",
+            "crie um novo agente",
+            "falar com",
+            "trocar uma ideia com",
+            "quero um agente",
+            "quero um agent",
+            "preciso de um agente",
+            "preciso de um agent",
+        ]
+        if not any(token in text for token in action_intents):
+            return additions
+
+        seen: set[str] = set()
+        aliases = self._agent_aliases()
+        for key, tokens in aliases.items():
+            if any(token in text for token in tokens):
+                seen.add(key)
+                additions.append(RequestedAgentAction(agent_key=key))
+
+        pattern = re.compile(
+            r"(?:create|add|hire|bring in|contrate|adicione|crie)\s+(?:a\s+|an\s+|um\s+|uma\s+|novo\s+|nova\s+|new\s+)?(?:agent|agente)\s+([a-z0-9/_ -]{3,80})",
+            re.IGNORECASE,
+        )
+        for match in pattern.findall(source_content):
+            label = self._trim_agent_label_candidate(match)
+            if not label:
+                continue
+            mapped = self._map_agent_label(label)
+            if mapped is not None:
+                if mapped not in seen:
+                    seen.add(mapped)
+                    additions.append(RequestedAgentAction(agent_key=mapped))
+                continue
+            display_name = self._display_name_for_agent_label(label)
+            key = self._agent_key_for_label(label)
+            if key in seen:
+                continue
+            seen.add(key)
+            additions.append(
+                RequestedAgentAction(
+                    agent_key=key,
+                    display_name=display_name,
+                    should_create_profile=True,
+                )
+            )
         return additions
 
     def _active_root_task(self, conversation_id: str) -> Task | None:
@@ -858,65 +988,117 @@ class ConversationService:
         return root_tasks[-1]
 
     def _ensure_pipeline(self, context: MessageContext, content: str, message_id: str) -> tuple[Task, list[Task], bool]:
-        key = f"pipeline:{context.conversation.id}:{self._task_title_from_content(content).lower()}"
-        existing = self.tasks.find_active_by_idempotency(conversation_id=context.conversation.id, idempotency_key=key)
-        if existing is not None:
-            return existing, self.tasks.list_subtasks(existing.id), False
-        root, stages = self.tasks.create_pipeline_task(
+        contract = self._task_contract_from_content(context=context, content=content, kind=TaskKind.PIPELINE.value)
+        result = self.domain_actions.create_task(
             conversation_id=context.conversation.id,
             project_id=context.conversation.project_id,
-            title=self._task_title_from_content(content),
-            goal=content,
+            contract=contract,
             created_by_message_id=message_id,
-            idempotency_key=key,
         )
-        return root, stages, True
+        return result.task, result.subtasks, result.created
 
     def _ensure_simple_task(self, context: MessageContext, content: str, message_id: str) -> tuple[Task, bool]:
-        key = f"task:{context.conversation.id}:{self._task_title_from_content(content).lower()}"
-        existing = self.tasks.find_active_by_idempotency(conversation_id=context.conversation.id, idempotency_key=key)
-        if existing is not None:
-            return existing, False
-        task = self.tasks.create_simple_task(
+        contract = self._task_contract_from_content(context=context, content=content, kind=TaskKind.SIMPLE.value)
+        result = self.domain_actions.create_task(
             conversation_id=context.conversation.id,
             project_id=context.conversation.project_id,
-            title=self._task_title_from_content(content),
-            goal=content,
-            assigned_agent_key="specialist",
+            contract=contract,
             created_by_message_id=message_id,
-            idempotency_key=key,
         )
-        return task, True
+        return result.task, result.created
 
     def _ensure_decomposition(self, context: MessageContext, root_task: Task, message_id: str) -> tuple[list[Task], bool]:
-        existing = [task for task in self.tasks.list_subtasks(root_task.id) if task.kind == TaskKind.SUBTASK.value]
-        if existing:
-            return existing, False
-        subtasks = self.tasks.ensure_subtasks(
+        result = self.domain_actions.create_subtasks(
             conversation_id=context.conversation.id,
             project_id=context.conversation.project_id,
             parent_task_id=root_task.id,
             created_by_message_id=message_id,
-            items=[
-                {"title": "Clarify scope and acceptance criteria", "goal": "Clarify v1 boundaries", "assigned_agent_key": "po_pm"},
-                {"title": "Implement the core happy path", "goal": "Build the main user flow", "assigned_agent_key": "specialist"},
-                {"title": "Validate the critical path", "goal": "Confirm the core flow works", "assigned_agent_key": "qa"},
-                {"title": "Prepare repo and delivery hygiene", "goal": "Capture release and repo follow-up", "assigned_agent_key": "github"},
+            contracts=[
+                SubtaskContract(
+                    title="Clarify scope and acceptance criteria",
+                    goal="Clarify v1 boundaries and capture acceptance criteria for the task.",
+                    assigned_agent_key="po_pm",
+                    acceptance_criteria_markdown=root_task.acceptance_criteria_markdown,
+                    repository_name=root_task.repository_name,
+                    branch_name=root_task.branch_name,
+                    environment_name=root_task.environment_name,
+                    gmud_reference=root_task.gmud_reference,
+                ),
+                SubtaskContract(
+                    title="Implement the core happy path",
+                    goal="Build the main user flow and core implementation slice.",
+                    assigned_agent_key="specialist",
+                    repository_name=root_task.repository_name,
+                    branch_name=root_task.branch_name,
+                    environment_name=root_task.environment_name,
+                ),
+                SubtaskContract(
+                    title="Validate the critical path",
+                    goal="Confirm the core flow works and document evidence.",
+                    assigned_agent_key="qa",
+                    repository_name=root_task.repository_name,
+                    branch_name=root_task.branch_name,
+                    environment_name=root_task.environment_name,
+                ),
+                SubtaskContract(
+                    title="Prepare repo and delivery hygiene",
+                    goal="Capture repository, release, and deployment follow-up.",
+                    assigned_agent_key="github",
+                    repository_name=root_task.repository_name,
+                    branch_name=root_task.branch_name,
+                    environment_name=root_task.environment_name,
+                    approval_required=root_task.approval_required,
+                    gmud_reference=root_task.gmud_reference,
+                ),
             ],
         )
-        return subtasks, True
+        return result.subtasks, result.created
 
     def _wants_pipeline_creation(self, text: str) -> bool:
         return (
-            ("pipeline" in text and any(token in text for token in ["create", "set up", "build", "prepare", "start"]))
-            or any(token in text for token in ["create project", "new mvp"])
+            ("pipeline" in text and any(token in text for token in ["create", "set up", "build", "prepare", "start", "crie", "monta", "prepare"]))
+            or any(token in text for token in ["create project", "new mvp", "crie um projeto", "crie o pipeline", "task pipeline", "pipeline de task", "pipeline de tarefas"])
         )
 
     def _wants_simple_task_creation(self, text: str) -> bool:
-        return any(token in text for token in ["create task", "separate task", "follow-up task"])
+        return any(
+            token in text
+            for token in [
+                "create task",
+                "create a task",
+                "create tasks",
+                "separate task",
+                "follow-up task",
+                "crie a task",
+                "crie uma task",
+                "crie as tasks",
+                "crie a tarefa",
+                "crie uma tarefa",
+                "crie as tarefas",
+                "abra uma task",
+                "abrir uma task",
+            ]
+        )
 
     def _wants_decomposition(self, text: str) -> bool:
-        return any(token in text for token in ["decompose", "break down", "refine the mvp", "refine into", "small incremental steps", "subtasks"])
+        return any(
+            token in text
+            for token in [
+                "decompose",
+                "break down",
+                "refine the mvp",
+                "refine into",
+                "small incremental steps",
+                "subtasks",
+                "crie subtasks",
+                "sub tarefas",
+                "subtarefas",
+                "quebre em etapas",
+                "quebre em subtasks",
+                "quebre em subtarefas",
+                "decomponha",
+            ]
+        )
 
     def _wants_deploy_action(self, text: str) -> bool:
         if "deploy" not in text and "production" not in text:
@@ -966,7 +1148,12 @@ class ConversationService:
         messages: Iterable[ConversationMessage],
         current_task: Task | None,
     ) -> str:
-        transcript = "\n".join(f"{message.author_name}: {message.content}" for message in list(messages)[-10:])
+        visible_messages = [
+            message
+            for message in list(messages)
+            if not message.metadata_json.get("streamMessage")
+        ]
+        transcript = "\n".join(f"{message.author_name}: {message.content}" for message in visible_messages[-10:])
         open_tasks = self.tasks.list_for_conversation(conversation.id)
         task_lines = "\n".join(
             f"- {task.id} [{task.status}] {task.title}"
@@ -993,8 +1180,85 @@ class ConversationService:
             f"{task_focus}\n"
             f"Relevant memory:\n{memory_lines}\n\n"
             f"Current user message:\n{user_prompt}\n\n"
-            "Keep the response human-readable. If you are blocked, explain why. If work is ongoing, summarize progress clearly."
+            f"Task update directive contract for {participant.display_name}:\n{self._task_update_tool_contract(participant.agent_key or 'principal')}\n\n"
+            "Keep the response human-readable. If you are blocked, explain why. If work is ongoing, summarize progress clearly. "
+            "Important: Marrowy domain actions such as creating tasks, creating subtasks, adding agents, or creating agent profiles "
+            "are executed outside the model. Do not claim those actions happened unless the transcript already shows that Marrowy confirmed them. "
+            "If you need to update an existing task, use the task update directive exactly as documented and Marrowy will apply it."
         )
+
+    def _ensure_stream_message(
+        self,
+        *,
+        conversation_id: str,
+        participant: ConversationParticipant,
+        job: Job,
+    ) -> ConversationMessage:
+        stream_message_id = (job.payload_json or {}).get("streamMessageId")
+        if isinstance(stream_message_id, str):
+            existing = self.db.get(ConversationMessage, stream_message_id)
+            if existing is not None:
+                return existing
+        message = self.add_message(
+            conversation_id=conversation_id,
+            author_name=participant.display_name,
+            author_kind=ParticipantKind.AGENT.value,
+            content="",
+            message_type=MessageKind.AGENT.value,
+            participant_id=participant.id,
+            metadata={
+                "jobId": job.id,
+                "streamMessage": True,
+                "streamState": "waiting",
+                "thinking": [],
+            },
+        )
+        payload_json = dict(job.payload_json or {})
+        payload_json["streamMessageId"] = message.id
+        job.payload_json = payload_json
+        self.db.flush()
+        return message
+
+    def _update_message(self, message: ConversationMessage, *, content: str | None = None, metadata: dict | None = None) -> None:
+        if content is not None:
+            message.content = content
+        if metadata is not None:
+            message.metadata_json = metadata
+        self.db.flush()
+        self.events.emit(
+            "conversation.message.updated",
+            conversation_id=message.conversation_id,
+            payload={"messageId": message.id, "messageType": message.message_type},
+        )
+
+    def _set_stream_state(self, message: ConversationMessage, state: str) -> None:
+        metadata = dict(message.metadata_json or {})
+        metadata["streamState"] = state
+        self._update_message(message, metadata=metadata)
+
+    def _append_stream_content(self, message: ConversationMessage, delta: str) -> None:
+        metadata = dict(message.metadata_json or {})
+        metadata["streamState"] = "streaming"
+        content = f"{message.content}{delta}"
+        self._update_message(message, content=content, metadata=metadata)
+
+    def _append_stream_thinking(self, message: ConversationMessage, progress_type: str, text: str) -> None:
+        metadata = dict(message.metadata_json or {})
+        thinking = list(metadata.get("thinking", []))
+        entry = {"type": progress_type, "text": text}
+        if not thinking or thinking[-1] != entry:
+            thinking.append(entry)
+        metadata["thinking"] = thinking[-20:]
+        if metadata.get("streamState") != "streaming":
+            metadata["streamState"] = "thinking"
+        self._update_message(message, metadata=metadata)
+
+    def _finalize_stream_message(self, message: ConversationMessage, *, content: str, metadata_updates: dict | None = None) -> None:
+        metadata = dict(message.metadata_json or {})
+        metadata["streamState"] = "final"
+        if metadata_updates:
+            metadata.update(metadata_updates)
+        self._update_message(message, content=content, metadata=metadata)
 
     def _refresh_conversation_state(self, conversation_id: str) -> None:
         conversation = self.get_conversation(conversation_id)
@@ -1095,6 +1359,139 @@ class ConversationService:
             trimmed = trimmed[:69] + "..."
         return trimmed[:1].upper() + trimmed[1:]
 
+    def _task_contract_from_content(self, *, context: MessageContext, content: str, kind: str) -> TaskContract:
+        lowered = _normalize_text(content)
+        default_agent = {
+            TaskKind.PIPELINE.value: "po_pm",
+            TaskKind.SIMPLE.value: "specialist",
+            TaskKind.SUBTASK.value: "specialist",
+        }.get(kind, "specialist")
+        approval_required = "aprova" in lowered or "approval" in lowered or "production" in lowered or "gmud" in lowered
+        repository_name = self._primary_repository_name(context.project)
+        environment_name = self._default_environment_name(context.project, lowered)
+        acceptance = None
+        if "acceptance criteria" in lowered or "criterios de aceite" in lowered or "critérios de aceite" in lowered:
+            acceptance = "Honor the acceptance criteria explicitly requested in the user prompt."
+        return TaskContract(
+            title=self._task_title_from_content(content),
+            goal=content.strip(),
+            kind=kind,  # type: ignore[arg-type]
+            scope=content.strip(),
+            acceptance_criteria_markdown=acceptance,
+            repository_name=repository_name,
+            branch_name="main" if repository_name else None,
+            environment_name=environment_name,
+            assigned_agent_key=default_agent,
+            details_markdown=f"Requested from chat:\n\n{content.strip()}",
+            approval_required=approval_required,
+            observations_markdown="Created from natural-language chat request via Marrowy domain actions.",
+        )
+
+    @staticmethod
+    def _agent_aliases() -> dict[str, list[str]]:
+        return {
+            "specialist": [
+                "@specialist",
+                "agent specialist",
+                "agente especialista",
+                "specialist",
+                "especialista",
+            ],
+            "qa": ["@qa", "agent qa", "agente qa", "qa", "quality assurance", "qualidade"],
+            "github": ["@github", "agent github", "agente github", "github"],
+            "devops": ["@devops", "agent devops", "agente devops", "devops", "infra", "platform"],
+            "po_pm": [
+                "@po",
+                "@pm",
+                "agent po/pm",
+                "agent pm",
+                "agent po",
+                "agente po/pm",
+                "agente pm",
+                "agente po",
+                "po/pm",
+                "product",
+                "discovery",
+            ],
+            "frontend": ["@frontend", "agent frontend", "agente frontend", "frontend", "front-end", "ui engineer"],
+            "backend_python": ["@backend", "agent backend", "agente backend", "backend", "back-end", "backend python"],
+        }
+
+    def _map_agent_label(self, label: str) -> str | None:
+        normalized = _normalize_text(label)
+        for key, tokens in self._agent_aliases().items():
+            if normalized == key or any(normalized == token or normalized in token or token in normalized for token in tokens):
+                return key
+        return None
+
+    def _agent_key_for_label(self, label: str) -> str:
+        mapped = self._map_agent_label(label)
+        if mapped is not None:
+            return mapped
+        sanitized = re.sub(r"[^a-z0-9]+", "_", _normalize_text(label)).strip("_")
+        return sanitized or "custom_agent"
+
+    @staticmethod
+    def _trim_agent_label_candidate(value: str) -> str:
+        label = _normalize_text(value)
+        for separator in [" para ", " to ", " and ", " e ", ",", ".", " na room", " in the room"]:
+            if separator in label:
+                label = label.split(separator, 1)[0]
+        return label.strip()
+
+    def _display_name_for_agent_label(self, label: str) -> str:
+        mapped = self._map_agent_label(label)
+        if mapped is not None:
+            return get_agent_profile(mapped).display_name
+        normalized = " ".join(part.capitalize() for part in re.split(r"[^a-z0-9]+", _normalize_text(label)) if part)
+        if normalized.lower().startswith("agent "):
+            return normalized
+        return f"Agent {normalized}"
+
+    def _agent_profile_contract_from_label(self, label: str) -> AgentProfileContract:
+        display_name = self._display_name_for_agent_label(label)
+        agent_key = self._agent_key_for_label(label)
+        lowered = _normalize_text(label)
+        can_create_tasks = any(token in lowered for token in ["pm", "po", "product", "specialist", "engineer", "developer", "frontend", "backend"])
+        can_manage_repo = any(token in lowered for token in ["github", "git", "repo"])
+        can_manage_deploy = any(token in lowered for token in ["devops", "infra", "platform", "deploy"])
+        summary = f"Specialized agent focused on {label} work."
+        instructions = (
+            f"You are {display_name}. Focus on {label} responsibilities, keep updates clear, and only claim domain "
+            "actions that Marrowy has actually confirmed in the room state."
+        )
+        return AgentProfileContract(
+            key=agent_key,
+            display_name=display_name,
+            summary=summary,
+            instructions=instructions,
+            effort="medium",
+            can_create_tasks=can_create_tasks,
+            can_manage_repo=can_manage_repo,
+            can_manage_deploy=can_manage_deploy,
+        )
+
+    @staticmethod
+    def _primary_repository_name(project: Project | None) -> str | None:
+        if project is None:
+            return None
+        for repo in project.repositories:
+            if repo.is_primary:
+                return repo.name
+        if project.repositories:
+            return project.repositories[0].name
+        return None
+
+    @staticmethod
+    def _default_environment_name(project: Project | None, lowered_text: str) -> str | None:
+        if project is None or not project.environments:
+            return None
+        if "production" in lowered_text or "producao" in lowered_text or "produção" in lowered_text:
+            for env in project.environments:
+                if env.name.lower() == "production":
+                    return env.name
+        return project.environments[0].name
+
     @staticmethod
     def _select_cwd(project: Project | None) -> str | None:
         if project is None:
@@ -1103,3 +1500,54 @@ class ConversationService:
             if repo.is_primary and repo.local_path:
                 return repo.local_path
         return None
+
+    def _apply_task_update_directives(
+        self,
+        *,
+        participant: ConversationParticipant,
+        conversation: Conversation,
+        content: str,
+        job: Job,
+    ) -> tuple[str, list[dict[str, object]], list[str]]:
+        applied: list[dict[str, object]] = []
+        errors: list[str] = []
+        cleaned = content
+        for raw in self._extract_task_update_payloads(content):
+            try:
+                payload = json.loads(raw)
+                contract = TaskUpdateContract(**payload)
+                result = self.domain_actions.update_task(
+                    actor_agent_key=participant.agent_key or "principal",
+                    contract=contract,
+                )
+                if result.updated_fields:
+                    applied.append({"taskId": result.task.id, "updatedFields": result.updated_fields})
+            except Exception as exc:
+                errors.append(str(exc).strip() or exc.__class__.__name__)
+        cleaned = re.sub(r"\[marrowy-task-update\s+\{.*?\}\]", "", cleaned, flags=re.DOTALL)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        if not cleaned:
+            cleaned = f"[{participant.display_name}]"
+        return cleaned, applied, errors
+
+    @staticmethod
+    def _extract_task_update_payloads(content: str) -> list[str]:
+        return re.findall(r"\[marrowy-task-update\s+(\{.*?\})\]", content, flags=re.DOTALL)
+
+    def _task_update_tool_contract(self, agent_key: str) -> str:
+        allowed = {
+            "principal": "scope, acceptance_criteria_markdown, assigned_agent_key, updates_markdown, blockers_markdown, observations_markdown",
+            "po_pm": "scope, acceptance_criteria_markdown, assigned_agent_key, updates_markdown, blockers_markdown, observations_markdown",
+            "specialist": "updates_markdown, blockers_markdown, result_markdown, observations_markdown",
+            "qa": "updates_markdown, blockers_markdown, result_markdown, observations_markdown, evidence_markdown",
+            "github": "repository_name, branch_name, updates_markdown, observations_markdown, evidence_markdown",
+            "devops": "environment_name, updates_markdown, blockers_markdown, observations_markdown, evidence_markdown, gmud_reference",
+            "frontend": "updates_markdown, blockers_markdown, result_markdown, observations_markdown, evidence_markdown",
+            "backend_python": "updates_markdown, blockers_markdown, result_markdown, observations_markdown, evidence_markdown",
+        }.get(agent_key, "updates_markdown, observations_markdown")
+        return (
+            "When you need to edit an existing task, append a single-line directive like "
+            "`[marrowy-task-update {\"task_id\":\"<task-id>\",\"updates_markdown\":\"...\"}]` to the end of your reply. "
+            f"Allowed fields for this role: {allowed}. "
+            "Do not try to change title, goal, project, kind, or arbitrary status through this directive."
+        )

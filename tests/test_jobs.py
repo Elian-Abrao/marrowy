@@ -32,6 +32,7 @@ class SlowProvider:
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        effort: str | None = None,
         event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         self.started.set()
@@ -52,13 +53,37 @@ class FailingProvider:
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        effort: str | None = None,
         event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         raise RuntimeError("The Codex bridge timed out while waiting for a response.")
 
 
+class TaskUpdatingProvider:
+    async def complete(
+        self,
+        *,
+        role_name: str,
+        instructions: str,
+        prompt: str,
+        thread_id: str | None = None,
+        cwd: str | None = None,
+        effort: str | None = None,
+        event_handler=None,
+    ) -> tuple[ProviderResult, str | None]:
+        return (
+            ProviderResult(
+                text=(
+                    f"[{role_name}] QA review finished.\n\n"
+                    '[marrowy-task-update {"task_id":"TASK_ID","evidence_markdown":"Browser screenshots attached.","result_markdown":"Validated the main happy path.","updates_markdown":"QA pass completed."}]'
+                )
+            ),
+            thread_id or f"update-{role_name}",
+        )
+
+
 @pytest.mark.asyncio
-async def test_handle_user_message_acks_and_enqueues_jobs_immediately(db_session: Session):
+async def test_handle_user_message_creates_stream_placeholder_and_enqueues_jobs_immediately(db_session: Session):
     project = ProjectService(db_session).seed_default_project()
     service = ConversationService(db_session, FakeProvider())
     conversation = service.create_conversation(title="Immediate ACK", project_id=project.id, user_name="Elian")
@@ -71,7 +96,10 @@ async def test_handle_user_message_acks_and_enqueues_jobs_immediately(db_session
     )
     db_session.commit()
 
-    assert any("I received your message" in message.content for message in messages)
+    stream_messages = [message for message in messages if message.metadata_json.get("streamMessage")]
+    assert stream_messages
+    assert all(message.metadata_json.get("streamState") == "waiting" for message in stream_messages)
+    assert not any("I received your message" in message.content for message in messages)
     jobs = service.jobs.list_for_conversation(conversation.id)
     assert jobs
     assert any(job.worker_key == "summary" for job in jobs)
@@ -110,7 +138,13 @@ async def test_job_runner_processes_jobs_and_updates_participant_activity(db_ses
         participants = service.list_participants(conversation.id)
         principal = next(item for item in participants if item.agent_key == "principal")
         assert principal.activity_state == ParticipantActivityState.IDLE.value
-        assert any(message.author_name == "Agent Principal" and message.message_type == "agent" for message in service.list_messages(conversation.id))
+        principal_message = next(
+            message for message in service.list_messages(conversation.id)
+            if message.author_name == "Agent Principal" and message.metadata_json.get("streamMessage")
+        )
+        assert principal_message.metadata_json.get("streamState") == "final"
+        assert principal_message.metadata_json.get("thinking")
+        assert principal_message.content.startswith("[Agent Principal]")
     finally:
         verify.close()
 
@@ -339,7 +373,7 @@ async def test_second_message_is_accepted_while_worker_is_running(db_session: Se
             user_name="Elian",
         )
         session_two.commit()
-        assert any("I received your message" in message.content for message in second)
+        assert any(message.metadata_json.get("streamMessage") for message in second)
     finally:
         session_two.close()
 
@@ -358,3 +392,55 @@ async def test_second_message_is_accepted_while_worker_is_running(db_session: Se
     finally:
         verify.close()
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_can_apply_limited_task_updates_via_directive(db_session: Session):
+    project = ProjectService(db_session).seed_default_project()
+    provider = TaskUpdatingProvider()
+    service = ConversationService(db_session, provider)
+    conversation = service.create_conversation(title="Directive update", project_id=project.id, user_name="Elian")
+    qa = service.add_agent(conversation.id, "qa")
+    task = service.tasks.create_simple_task(
+        conversation_id=conversation.id,
+        project_id=project.id,
+        title="Validate browser flow",
+        goal="Validate the browser flow",
+        assigned_agent_key="qa",
+    )
+    job, _ = service.jobs.enqueue(
+        conversation_id=conversation.id,
+        worker_key="qa",
+        agent_key="qa",
+        participant_id=qa.id,
+        task_id=task.id,
+        summary="Agent QA is validating the browser flow.",
+        source_message_id="source-task-update",
+        idempotency_key="source-task-update",
+        payload={"prompt": "Validate the browser flow"},
+    )
+    job.payload_json["prompt"] = "Validate task"
+    db_session.flush()
+
+    provider_text = provider.complete
+    async def patched_complete(**kwargs):
+        result, thread = await provider_text(**kwargs)
+        result.text = result.text.replace("TASK_ID", task.id)
+        return result, thread
+    provider.complete = patched_complete  # type: ignore[method-assign]
+
+    await service.process_job(job.id, worker_id="test-worker")
+    db_session.commit()
+
+    refreshed = service.tasks.get(task.id)
+    assert refreshed is not None
+    assert refreshed.evidence_markdown == "Browser screenshots attached."
+    assert refreshed.result_markdown == "Validated the main happy path."
+    assert refreshed.updates_markdown == "QA pass completed."
+
+    stream_message = next(
+        message for message in service.list_messages(conversation.id)
+        if message.metadata_json.get("streamMessage")
+    )
+    assert "[marrowy-task-update" not in stream_message.content
+    assert stream_message.metadata_json.get("taskUpdates")

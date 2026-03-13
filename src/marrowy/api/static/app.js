@@ -1,5 +1,6 @@
 const TASK_STATUSES = ["created", "planned", "in_progress", "blocked", "waiting_approval", "testing", "deploying", "done", "failed", "cancelled"];
 const ACTIVE_JOB_STATUSES = new Set(["queued", "claimed", "running", "waiting"]);
+const EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"];
 
 let refreshInFlight = false;
 let refreshQueued = false;
@@ -21,27 +22,79 @@ function renderEmptyState(text) {
   return `<li class="empty-item">${escapeHtml(text)}</li>`;
 }
 
+function getAgentProfile(agentKey) {
+  const profiles = Array.isArray(window.MARROWY_AGENT_PROFILES) ? window.MARROWY_AGENT_PROFILES : [];
+  return profiles.find((profile) => profile.key === agentKey) || null;
+}
+
+function renderThinkingSection(thinking, streamState) {
+  if (!Array.isArray(thinking) || thinking.length === 0) return "";
+  const markdown = thinking.map((entry) => `> ${entry.text}`).join("\n\n");
+  const html = (typeof marked !== "undefined")
+    ? marked.parse(markdown)
+    : `<pre>${escapeHtml(markdown)}</pre>`;
+  const countLabel = thinking.length === 1 ? "1 update" : `${thinking.length} updates`;
+  const isOpen = streamState !== "final" && streamState !== "error";
+  return `
+    <details class="thinking-panel" ${isOpen ? "open" : ""}>
+      <summary>
+        <span>Thinking</span>
+        <span class="thinking-count">${escapeHtml(countLabel)}</span>
+      </summary>
+      <div class="thinking-body markdown-body">${html}</div>
+    </details>
+  `;
+}
+
+function renderStreamPlaceholder(streamState) {
+  const label = streamState === "error" ? "Stopped" : "Thinking";
+  return `
+    <div class="stream-placeholder">
+      <span class="stream-indicator ${escapeHtml(streamState || "waiting")}">
+        <span class="stream-dot"></span>
+        <span class="stream-dot"></span>
+        <span class="stream-dot"></span>
+      </span>
+      <span class="stream-label">${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
 function renderMessage(message) {
   const icon = message.author_kind === 'user' ? 'user' : 'bot';
   const msgType = message.message_type || 'agent';
+  const metadata = message.metadata_json || {};
+  const streamState = metadata.streamState || "final";
+  const isStreamMessage = Boolean(metadata.streamMessage);
+  const thinkingHtml = renderThinkingSection(metadata.thinking || [], streamState);
   let innerHtml = '';
   
   if (message.author_kind === 'user') {
     innerHtml = `<pre>${escapeHtml(message.content)}</pre>`;
   } else {
-    // Handle markdown with marked
     const rawMarkdown = message.content;
-    const parsedHtml = (typeof marked !== 'undefined') ? marked.parse(rawMarkdown) : `<pre>${escapeHtml(rawMarkdown)}</pre>`;
+    const parsedHtml = rawMarkdown
+      ? ((typeof marked !== 'undefined') ? marked.parse(rawMarkdown) : `<pre>${escapeHtml(rawMarkdown)}</pre>`)
+      : "";
+    const bodyHtml = parsedHtml
+      ? `<div class="markdown-body">${parsedHtml}</div>`
+      : renderStreamPlaceholder(streamState);
+    const copyButton = rawMarkdown
+      ? `
+        <button class="btn-copy-msg" data-raw-content="${escapeHtml(rawMarkdown)}" title="Copy Markdown">
+          <i data-lucide="copy"></i>
+        </button>
+      `
+      : "";
     innerHtml = `
-      <div class="markdown-body">${parsedHtml}</div>
-      <button class="btn-copy-msg" data-raw-content="${escapeHtml(rawMarkdown)}" title="Copy Markdown">
-        <i data-lucide="copy"></i>
-      </button>
+      ${thinkingHtml}
+      ${bodyHtml}
+      ${copyButton}
     `;
   }
   
   return `
-    <article class="msg-bubble-wrapper kind-${escapeHtml(message.author_kind)}" data-author-kind="${escapeHtml(message.author_kind)}" data-msg-type="${escapeHtml(msgType)}">
+    <article class="msg-bubble-wrapper kind-${escapeHtml(message.author_kind)} ${isStreamMessage ? "is-stream-message" : ""}" data-author-kind="${escapeHtml(message.author_kind)}" data-msg-type="${escapeHtml(msgType)}" data-stream-state="${escapeHtml(streamState)}">
       <div class="msg-avatar">
         <i data-lucide="${icon}"></i>
       </div>
@@ -59,6 +112,18 @@ function renderMessage(message) {
 }
 
 function renderParticipant(participant) {
+  const profile = participant.agent_key ? getAgentProfile(participant.agent_key) : null;
+  const effortValue = profile?.effort || "medium";
+  const effortControl = participant.agent_key
+    ? `
+      <label class="agent-effort-control">
+        <span>Reasoning</span>
+        <select class="agent-effort-select" data-agent-key="${escapeHtml(participant.agent_key)}">
+          ${EFFORT_OPTIONS.map((option) => `<option value="${option}" ${option === effortValue ? "selected" : ""}>${option}</option>`).join("")}
+        </select>
+      </label>
+    `
+    : "";
   return `
     <li class="mini-card card-participant">
       <div class="card-head">
@@ -66,6 +131,7 @@ function renderParticipant(participant) {
         <span class="status-dot ${escapeHtml(participant.activity_state)}" title="${humanize(participant.activity_state)}"></span>
       </div>
       <div class="card-sub">${participant.activity_summary ? escapeHtml(participant.activity_summary) : "Idle"}</div>
+      ${effortControl}
     </li>
   `;
 }
@@ -428,6 +494,30 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("change", async (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLSelectElement)) return;
+
+  if (target.classList.contains("agent-effort-select")) {
+    const agentKey = target.dataset.agentKey;
+    if (!agentKey) return;
+    try {
+      const updated = await fetchJson(`/api/agents/${agentKey}`, {
+        method: "PATCH",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ effort: target.value }),
+      });
+      window.MARROWY_AGENT_PROFILES = (window.MARROWY_AGENT_PROFILES || []).map((profile) =>
+        profile.key === updated.key ? updated : profile
+      );
+      await enqueueRefresh(window.MARROWY_CONVERSATION_ID);
+    } catch (e) {
+      console.error(e);
+      await enqueueRefresh(window.MARROWY_CONVERSATION_ID);
+    }
+  }
+});
+
 document.addEventListener("DOMContentLoaded", () => {
   const conversationId = window.MARROWY_CONVERSATION_ID;
   if (!conversationId) return;
@@ -438,6 +528,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const refreshFromStream = () => enqueueRefresh(conversationId).catch(console.error);
   stream.onmessage = refreshFromStream;
   stream.addEventListener("conversation.message.created", refreshFromStream);
+  stream.addEventListener("conversation.message.updated", refreshFromStream);
+  stream.addEventListener("task.updated", refreshFromStream);
   stream.addEventListener("task.status.updated", refreshFromStream);
   stream.addEventListener("approval.requested", refreshFromStream);
   stream.addEventListener("job.queued", refreshFromStream);
@@ -457,12 +549,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const displayName = document.getElementById('new-agent-name')?.value?.trim();
       const summary = document.getElementById('new-agent-summary')?.value?.trim();
       const instructions = document.getElementById('new-agent-instructions')?.value?.trim() || summary;
+      const effort = document.getElementById('new-agent-effort')?.value || 'medium';
       if (!key || !displayName || !summary) return;
       try {
         await fetchJson('/api/agents', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ key, display_name: displayName, summary, instructions }),
+          body: JSON.stringify({ key, display_name: displayName, summary, instructions, effort }),
         });
         // Update local profiles list
         const profiles = await fetchJson('/api/agents');

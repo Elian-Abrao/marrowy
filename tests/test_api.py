@@ -41,7 +41,7 @@ def test_project_and_conversation_api_flow(client, db_session):
     )
     assert response.status_code == 200
     messages = response.json()
-    assert len(messages) >= 3
+    assert any(message["metadata_json"].get("streamMessage") for message in messages)
 
     tasks = client.get(f"/api/conversations/{conversation['id']}/tasks").json()
     assert any(task["kind"] == "pipeline" for task in tasks)
@@ -54,6 +54,28 @@ def test_project_and_conversation_api_flow(client, db_session):
     jobs = client.get(f"/api/conversations/{conversation['id']}/jobs").json()
     assert jobs
     assert any(job["worker_key"] == "summary" for job in jobs)
+
+
+def test_agent_effort_can_be_created_and_updated(client, db_session):
+    created = client.post(
+        "/api/agents",
+        json={
+            "key": "analyst",
+            "display_name": "Agent Analyst",
+            "summary": "Analyzes product and system behavior.",
+            "instructions": "Focus on structured analysis.",
+            "effort": "high",
+        },
+    )
+    assert created.status_code == 200
+    assert created.json()["effort"] == "high"
+
+    updated = client.patch(
+        "/api/agents/analyst",
+        json={"effort": "medium"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["effort"] == "medium"
 
 
 def test_whatsapp_channel_inbound(client, db_session):
@@ -90,6 +112,42 @@ def test_browser_ui_pages_render(client, db_session):
     conversation_page = client.get(f"/conversations/{conversation['id']}")
     assert conversation_page.status_code == 200
     assert "Task Pipeline" in conversation_page.text
+
+
+def test_manual_task_creation_accepts_rich_contract(client, db_session):
+    project = client.post("/api/projects", json={"slug": "task-contract-project", "name": "Task Contract Project"}).json()
+    conversation = client.post(
+        "/api/conversations",
+        json={"title": "Task contract room", "project_id": project["id"], "channel": "browser"},
+    ).json()
+
+    response = client.post(
+        f"/api/conversations/{conversation['id']}/tasks",
+        json={
+            "title": "Track deployment evidence",
+            "goal": "Track deployment evidence and GMUD for the release.",
+            "scope": "Release evidence only",
+            "acceptance_criteria_markdown": "- evidence attached\n- GMUD linked",
+            "repository_name": "marrowy",
+            "branch_name": "release/evidence",
+            "environment_name": "production",
+            "assigned_agent_key": "devops",
+            "details_markdown": "Create from API test.",
+            "updates_markdown": "Pending implementation.",
+            "blockers_markdown": "Waiting for deployment slot.",
+            "approval_required": True,
+            "observations_markdown": "Needs careful audit trail.",
+            "evidence_markdown": "Attach screenshots and logs.",
+            "gmud_reference": "GMUD-4242",
+        },
+    )
+    assert response.status_code == 200
+    task = response.json()
+    assert task["repository_name"] == "marrowy"
+    assert task["branch_name"] == "release/evidence"
+    assert task["environment_name"] == "production"
+    assert task["approval_required"] is True
+    assert task["gmud_reference"] == "GMUD-4242"
 
 
 def test_delete_conversation_removes_related_state(client, db_session):

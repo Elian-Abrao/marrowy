@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -15,6 +16,7 @@ from marrowy.api.deps import get_db
 from marrowy.db.models import DomainEvent
 from marrowy.domain.agents import list_all_profiles
 from marrowy.domain.agents import register_agent
+from marrowy.domain.agents import update_agent
 from marrowy.schemas.approvals import ApprovalRead
 from marrowy.schemas.approvals import ApprovalResolve
 from marrowy.schemas.conversations import AddAgentRequest
@@ -27,6 +29,8 @@ from marrowy.schemas.conversations import ParticipantRead
 from marrowy.schemas.tasks import TaskCreate
 from marrowy.schemas.tasks import TaskRead
 from marrowy.services.conversations import ConversationService
+from marrowy.services.domain_actions import SubtaskContract
+from marrowy.services.domain_actions import TaskContract
 from marrowy.services.tasks import TaskService
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -178,11 +182,15 @@ async def stream_events(
 
 # --- Agent management ---
 
+EffortLevel = Literal["low", "medium", "high", "xhigh"]
+
+
 class AgentCreateRequest(BaseModel):
     key: str
     display_name: str
     summary: str
     instructions: str
+    effort: EffortLevel = "medium"
     can_create_tasks: bool = False
     can_manage_repo: bool = False
     can_manage_deploy: bool = False
@@ -193,9 +201,20 @@ class AgentProfileRead(BaseModel):
     display_name: str
     summary: str
     instructions: str
+    effort: EffortLevel
     can_create_tasks: bool
     can_manage_repo: bool
     can_manage_deploy: bool
+
+
+class AgentUpdateRequest(BaseModel):
+    display_name: str | None = None
+    summary: str | None = None
+    instructions: str | None = None
+    effort: EffortLevel | None = None
+    can_create_tasks: bool | None = None
+    can_manage_repo: bool | None = None
+    can_manage_deploy: bool | None = None
 
 
 agents_router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -215,6 +234,23 @@ def create_agent(payload: AgentCreateRequest) -> AgentProfileRead:
         display_name=payload.display_name,
         summary=payload.summary,
         instructions=payload.instructions,
+        effort=payload.effort,
+        can_create_tasks=payload.can_create_tasks,
+        can_manage_repo=payload.can_manage_repo,
+        can_manage_deploy=payload.can_manage_deploy,
+    )
+    return AgentProfileRead(**asdict(profile))
+
+
+@agents_router.patch("/{agent_key}", response_model=AgentProfileRead)
+def patch_agent(agent_key: str, payload: AgentUpdateRequest) -> AgentProfileRead:
+    from dataclasses import asdict
+    profile = update_agent(
+        agent_key,
+        display_name=payload.display_name,
+        summary=payload.summary,
+        instructions=payload.instructions,
+        effort=payload.effort,
         can_create_tasks=payload.can_create_tasks,
         can_manage_repo=payload.can_manage_repo,
         can_manage_deploy=payload.can_manage_deploy,
@@ -228,18 +264,40 @@ def create_agent(payload: AgentCreateRequest) -> AgentProfileRead:
 def create_task_manually(
     conversation_id: str,
     payload: TaskCreate,
-    tasks: TaskService = Depends(get_task_service),
     service: ConversationService = Depends(get_conversation_service),
 ) -> TaskRead:
     conversation = service.get_conversation(conversation_id)
     if conversation is None:
         raise HTTPException(status_code=404, detail="conversation not found")
-    task = tasks.create_simple_task(
-        conversation_id=conversation_id,
-        project_id=conversation.project_id,
-        title=payload.title,
-        goal=payload.goal,
-        assigned_agent_key=payload.assigned_agent_key,
-    )
+    contract_data = payload.model_dump(exclude={"parent_task_id", "result_markdown"})
+    try:
+        if payload.kind == "pipeline":
+            result = service.domain_actions.create_task(
+                conversation_id=conversation_id,
+                project_id=conversation.project_id,
+                contract=TaskContract(**contract_data),
+            )
+            task = result.task
+        elif payload.kind == "subtask":
+            if not payload.parent_task_id:
+                raise HTTPException(status_code=400, detail="parent_task_id is required for subtasks")
+            result = service.domain_actions.create_subtasks(
+                conversation_id=conversation_id,
+                project_id=conversation.project_id,
+                parent_task_id=payload.parent_task_id,
+                contracts=[SubtaskContract(**contract_data)],
+            )
+            task = result.subtasks[0]
+        else:
+            result = service.domain_actions.create_task(
+                conversation_id=conversation_id,
+                project_id=conversation.project_id,
+                contract=TaskContract(**contract_data),
+            )
+            task = result.task
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.result_markdown:
+        task.result_markdown = payload.result_markdown
     service.db.commit()
     return TaskRead.model_validate(task)

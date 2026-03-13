@@ -23,5 +23,6 @@ class ModelProvider(Protocol):
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        effort: str | None = None,
         event_handler: Callable[[str, str], Awaitable[None] | None] | None = None,
     ) -> tuple[ProviderResult, str | None]: ...

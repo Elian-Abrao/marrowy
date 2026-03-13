@@ -23,6 +23,7 @@ class CodexBridgeProvider:
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        effort: str | None = None,
         event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         prompt_text = self._build_prompt(role_name=role_name, instructions=instructions, prompt=prompt)
@@ -31,6 +32,7 @@ class CodexBridgeProvider:
                 prompt_text=prompt_text,
                 thread_id=thread_id,
                 cwd=cwd,
+                effort=effort,
                 event_handler=event_handler,
             )
         except RuntimeError as exc:
@@ -46,6 +48,7 @@ class CodexBridgeProvider:
                     prompt_text=prompt_text,
                     thread_id=None,
                     cwd=cwd,
+                    effort=effort,
                     event_handler=event_handler,
                 )
             raise
@@ -56,10 +59,12 @@ class CodexBridgeProvider:
         prompt_text: str,
         thread_id: str | None,
         cwd: str | None,
+        effort: str | None,
         event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         payload: dict[str, object] = {
             "prompt": prompt_text,
+            "summary": "concise",
         }
         if thread_id:
             payload["threadId"] = thread_id
@@ -67,6 +72,8 @@ class CodexBridgeProvider:
             payload["approvalPolicy"] = self.approval_policy
         if self.sandbox:
             payload["sandbox"] = self.sandbox
+        if effort:
+            payload["effort"] = effort
         if cwd:
             payload["cwd"] = cwd
 
@@ -110,6 +117,11 @@ class CodexBridgeProvider:
                         elif event_type == "status" and isinstance(event.get("text"), str):
                             if event_handler is not None:
                                 maybe = event_handler("status", event["text"])
+                                if asyncio.iscoroutine(maybe):
+                                    await maybe
+                        elif event_type == "assistant_delta" and isinstance(event.get("text"), str):
+                            if event_handler is not None:
+                                maybe = event_handler("assistant_delta", event["text"])
                                 if asyncio.iscoroutine(maybe):
                                     await maybe
                         elif event_type == "final":

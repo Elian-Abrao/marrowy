@@ -220,3 +220,43 @@ async def test_decomposition_targets_the_named_pipeline(db_session):
     notes_root = next(task for task in tasks if task.parent_task_id is None and "notes" in task.title.lower())
     note_subtasks = [task for task in tasks if task.parent_task_id == notes_root.id and task.kind == "subtask"]
     assert len(note_subtasks) == 4
+
+
+@pytest.mark.asyncio
+async def test_portuguese_task_and_subtasks_request_creates_real_state(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Portuguese task flow", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Perfeito, crie a task e subtasks para melhorar esse frontend e organize isso para mim.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    tasks = service.tasks.list_for_conversation(conversation.id)
+    root_tasks = [task for task in tasks if task.parent_task_id is None]
+    subtasks = [task for task in tasks if task.parent_task_id is not None and task.kind == "subtask"]
+
+    assert len(root_tasks) == 1
+    assert len(subtasks) == 4
+
+
+@pytest.mark.asyncio
+async def test_unknown_agent_request_creates_profile_and_adds_participant(db_session):
+    project = ProjectService(db_session).seed_default_project()
+    service = ConversationService(db_session, FakeProvider())
+    conversation = service.create_conversation(title="Custom agent flow", project_id=project.id, user_name="Elian")
+    db_session.commit()
+
+    await service.handle_user_message(
+        conversation.id,
+        content="Crie um agent Prompt Engineer e coloque ele na room para refinar os prompts do projeto.",
+        user_name="Elian",
+    )
+    db_session.commit()
+
+    participants = service.list_participants(conversation.id)
+    assert any(participant.agent_key == "prompt_engineer" for participant in participants)

@@ -9,6 +9,7 @@ class AgentProfile:
     display_name: str
     summary: str
     instructions: str
+    effort: str = "medium"
     can_create_tasks: bool = False
     can_manage_repo: bool = False
     can_manage_deploy: bool = False
@@ -24,6 +25,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "Frontend, Agent Backend Python, Agent QA, etc), and do NOT do the heavy lifting yourself. "
             "Focus on short, objective updates. When detailed work is needed, delegate it."
         ),
+        effort="medium",
         can_create_tasks=True,
     ),
     "specialist": AgentProfile(
@@ -31,6 +33,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
         display_name="Agent Specialist",
         summary="Implements technical changes and diagnoses problems.",
         instructions="You are the Agent Specialist. Focus on diagnosis, implementation, and architecture tradeoffs.",
+        effort="high",
         can_create_tasks=True,
     ),
     "qa": AgentProfile(
@@ -38,12 +41,14 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
         display_name="Agent QA",
         summary="Validates behavior, tests flows, and reports defects.",
         instructions="You are Agent QA. Focus on risks, verification, and clear findings.",
+        effort="high",
     ),
     "github": AgentProfile(
         key="github",
         display_name="Agent GitHub",
         summary="Manages repository operations, branches, pull requests, and release hygiene.",
         instructions="You are Agent GitHub. Focus on repository state, commits, branches, and release traceability.",
+        effort="medium",
         can_manage_repo=True,
     ),
     "devops": AgentProfile(
@@ -51,6 +56,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
         display_name="Agent DevOps",
         summary="Manages infrastructure, environments, and deployments.",
         instructions="You are Agent DevOps. Focus on environments, deployment safety, and operational implications.",
+        effort="high",
         can_manage_deploy=True,
     ),
     "po_pm": AgentProfile(
@@ -58,6 +64,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
         display_name="Agent PO/PM",
         summary="Breaks work into tasks and manages delivery pipelines.",
         instructions="You are Agent PO/PM. Focus on scope, task decomposition, and pipeline clarity.",
+        effort="medium",
         can_create_tasks=True,
     ),
     "backend_python": AgentProfile(
@@ -70,6 +77,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "Respect the existing architecture, files, tests, and formatting of existing projects. "
             "Produce clear logic with error handling as appropriate."
         ),
+        effort="high",
         can_create_tasks=True,
     ),
     "frontend": AgentProfile(
@@ -83,6 +91,7 @@ AGENT_PROFILES: dict[str, AgentProfile] = {
             "Respect any existing project identity or tech stack (e.g., Tailwind, Vanilla CSS, React, etc). "
             "Do not output placeholders if a working UI can be demonstrated."
         ),
+        effort="high",
         can_create_tasks=True,
     ),
 }
@@ -104,6 +113,7 @@ def register_agent(
     display_name: str,
     summary: str,
     instructions: str,
+    effort: str = "medium",
     can_create_tasks: bool = False,
     can_manage_repo: bool = False,
     can_manage_deploy: bool = False,
@@ -116,9 +126,36 @@ def register_agent(
         display_name=display_name,
         summary=summary,
         instructions=instructions,
+        effort=effort,
         can_create_tasks=can_create_tasks,
         can_manage_repo=can_manage_repo,
         can_manage_deploy=can_manage_deploy,
     )
     AGENT_PROFILES[key] = profile
     return profile
+
+
+def update_agent(
+    key: str,
+    *,
+    display_name: str | None = None,
+    summary: str | None = None,
+    instructions: str | None = None,
+    effort: str | None = None,
+    can_create_tasks: bool | None = None,
+    can_manage_repo: bool | None = None,
+    can_manage_deploy: bool | None = None,
+) -> AgentProfile:
+    profile = get_agent_profile(key)
+    updated = AgentProfile(
+        key=profile.key,
+        display_name=display_name or profile.display_name,
+        summary=summary or profile.summary,
+        instructions=instructions or profile.instructions,
+        effort=effort or profile.effort,
+        can_create_tasks=profile.can_create_tasks if can_create_tasks is None else can_create_tasks,
+        can_manage_repo=profile.can_manage_repo if can_manage_repo is None else can_manage_repo,
+        can_manage_deploy=profile.can_manage_deploy if can_manage_deploy is None else can_manage_deploy,
+    )
+    AGENT_PROFILES[key] = updated
+    return updated

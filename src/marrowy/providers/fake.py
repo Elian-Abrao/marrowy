@@ -18,6 +18,7 @@ class FakeProvider:
         prompt: str,
         thread_id: str | None = None,
         cwd: str | None = None,
+        effort: str | None = None,
         event_handler=None,
     ) -> tuple[ProviderResult, str | None]:
         self._counters[role_name] += 1
@@ -29,5 +30,9 @@ class FakeProvider:
             maybe = event_handler("action", f"{role_name} is preparing the next update.")
             if asyncio.iscoroutine(maybe):
                 await maybe
+            for token in (f"[{role_name}] ", short_prompt[:180]):
+                maybe = event_handler("assistant_delta", token)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
         text = f"[{role_name}] {short_prompt[:180]}"
         return ProviderResult(text=text), thread_id or f"fake-{role_name}"

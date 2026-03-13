@@ -88,12 +88,23 @@
           <h4 class="group-title">Participants</h4>
           <ul id="participants-list" class="cards-list">
             {% for participant in participants %}
+            {% set profile = (agent_profiles | selectattr("key", "equalto", participant.agent_key) | list | first) if participant.agent_key else none %}
             <li class="mini-card card-participant">
               <div class="card-head">
                 <strong>{{ participant.display_name }}</strong>
                 <span class="status-dot {{ participant.activity_state }}"></span>
               </div>
               <div class="card-sub">{{ participant.activity_summary or "Idle" }}</div>
+              {% if participant.agent_key and profile %}
+              <label class="agent-effort-control">
+                <span>Reasoning</span>
+                <select class="agent-effort-select" data-agent-key="{{ participant.agent_key }}">
+                  {% for effort in ["low", "medium", "high", "xhigh"] %}
+                  <option value="{{ effort }}" {% if profile.effort == effort %}selected{% endif %}>{{ effort }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              {% endif %}
             </li>
             {% else %}
             <li class="empty-item">No agents joined yet.</li>
@@ -119,6 +130,11 @@
             <input type="text" id="new-agent-name" placeholder="Display Name (e.g. Agent Analyst)" required />
             <input type="text" id="new-agent-summary" placeholder="Summary / Role" required />
             <textarea id="new-agent-instructions" placeholder="Instructions for the agent..." rows="2"></textarea>
+            <select id="new-agent-effort">
+              {% for effort in ["low", "medium", "high", "xhigh"] %}
+              <option value="{{ effort }}" {% if effort == "medium" %}selected{% endif %}>{{ effort }}</option>
+              {% endfor %}
+            </select>
             <button type="submit" class="btn-primary btn-sm-full"><i data-lucide="user-plus"></i> Create Agent</button>
           </form>
         </div>

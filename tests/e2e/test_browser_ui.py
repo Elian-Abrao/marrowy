@@ -58,6 +58,8 @@ def test_browser_ui_flow(tmp_path):
             page.fill("#chat-input", "Create a todo MVP pipeline, add QA, and prepare deploy validation.")
             page.click(".send-btn")
             page.wait_for_timeout(1500)
+            assert page.locator("body").inner_text().find("I received your message") == -1
+            assert page.locator("details.thinking-panel").count() >= 1
             page.click("#btn-toggle-tasks")
             page.wait_for_timeout(250)
             body = page.locator("body").inner_text()
@@ -66,6 +68,8 @@ def test_browser_ui_flow(tmp_path):
             assert "Agent QA" in body
             page.click("#btn-toggle-agents")
             page.wait_for_timeout(250)
+            assert page.locator("#new-agent-effort").count() == 1
+            assert page.locator(".agent-effort-select").count() >= 1
             body = page.locator("body").inner_text()
             assert "BACKGROUND ACTIVITY (TOOLCALLS)" in body
             assert "Listening for jobs..." in body
